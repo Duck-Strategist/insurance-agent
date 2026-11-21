@@ -1,22 +1,26 @@
 import { Flex, Layout, Menu, Typography } from 'antd'
 import { Link, Outlet, useLocation } from 'react-router'
 
+import { useAuthStore } from '../stores/auth'
 import { BackendStatus } from './BackendStatus'
 import { UserMenu } from './UserMenu'
 
 const NAV_ITEMS = [
   { key: '/', label: <Link to="/">首页</Link> },
   { key: '/products', label: <Link to="/products">保险产品</Link> },
-  // 后续里程碑加入：顾问对话、我的画像、管理后台
+  // 后续里程碑加入：顾问对话、我的画像
 ]
+const ADMIN_ITEMS = [{ key: '/admin', label: <Link to="/admin/documents">条款管理</Link> }]
 
 function selectedNav(pathname: string): string {
   if (pathname.startsWith('/products')) return '/products'
+  if (pathname.startsWith('/admin')) return '/admin'
   return pathname
 }
 
 export function AppLayout() {
   const { pathname } = useLocation()
+  const isAdmin = useAuthStore((s) => s.user?.role === 'admin')
 
   return (
     <Layout style={{ minHeight: '100vh' }}>
@@ -30,7 +34,7 @@ export function AppLayout() {
           theme="dark"
           mode="horizontal"
           selectedKeys={[selectedNav(pathname)]}
-          items={NAV_ITEMS}
+          items={isAdmin ? [...NAV_ITEMS, ...ADMIN_ITEMS] : NAV_ITEMS}
           style={{ flex: 1, minWidth: 0 }}
         />
         <Flex align="center" gap={16} style={{ color: '#fff' }}>

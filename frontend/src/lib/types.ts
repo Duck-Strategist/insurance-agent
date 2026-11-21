@@ -33,6 +33,42 @@ export interface Product {
   max_premium: string | null
 }
 
+export type DocumentStatus = 'pending' | 'parsed' | 'indexed' | 'failed'
+
+export interface DocumentStats {
+  input_chars?: number
+  body_chars?: number
+  removed_lines?: Record<string, number>
+  headings?: Record<string, number>
+  levels?: Record<string, number>
+  sections?: number
+  title?: string | null
+  max_child_chars?: number
+}
+
+export interface ClauseDocument {
+  id: number
+  file_name: string
+  status: DocumentStatus
+  processing: boolean
+  error: string | null
+  parent_count: number
+  child_count: number
+  stats: DocumentStats
+  indexed_at: string | null
+  updated_at: string
+  products: { id: number; name: string }[]
+}
+
+export interface ParentPreview {
+  id: number
+  seq: number
+  section_path: string[]
+  chars: number
+  child_count: number
+  preview: string
+}
+
 export interface Page<T> {
   items: T[]
   total: number

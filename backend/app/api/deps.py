@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
 from app.core.security import InvalidTokenError, decode_access_token
-from app.models import User
+from app.models import User, UserRole
 
 
 async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
@@ -55,3 +55,12 @@ async def get_current_user(
 
 
 CurrentUser = Annotated[User, Depends(get_current_user)]
+
+
+async def get_admin_user(user: CurrentUser) -> User:
+    if user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
+    return user
+
+
+AdminUser = Annotated[User, Depends(get_admin_user)]

@@ -1,7 +1,15 @@
 /** 统一的请求封装：注入 JWT、把后端错误转成 ApiError、401 时清除登录态。 */
 
 import { useAuthStore } from '../stores/auth'
-import type { Page, Product, ProductCategory, TokenResponse, User } from './types'
+import type {
+  ClauseDocument,
+  Page,
+  ParentPreview,
+  Product,
+  ProductCategory,
+  TokenResponse,
+  User,
+} from './types'
 
 export class ApiError extends Error {
   readonly status: number
@@ -31,7 +39,8 @@ async function errorMessage(response: Response): Promise<string> {
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   // 用 Headers 合并：调用方可以传对象、数组或 Headers 实例，都不会丢
   const headers = new Headers(init?.headers)
-  if (init?.body !== undefined && !headers.has('Content-Type')) {
+  // 只给字符串（JSON）请求体加类型；FormData 由浏览器自动带上 multipart 边界，不能手动设置
+  if (typeof init?.body === 'string' && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
   const token = useAuthStore.getState().token
@@ -92,4 +101,18 @@ export const productApi = {
     return request<Page<Product>>(`/api/v1/products?${params}`)
   },
   get: (id: number) => request<Product>(`/api/v1/products/${id}`),
+}
+
+// ---- 管理后台 ----
+export const adminApi = {
+  listDocuments: () => request<ClauseDocument[]>('/api/v1/admin/documents'),
+  reindex: (id: number) =>
+    request<{ status: string }>(`/api/v1/admin/documents/${id}/reindex`, { method: 'POST' }),
+  upload: (file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return request<ClauseDocument>('/api/v1/admin/documents', { method: 'POST', body: form })
+  },
+  parents: (id: number) =>
+    request<ParentPreview[]>(`/api/v1/admin/documents/${id}/parents?limit=200`),
 }

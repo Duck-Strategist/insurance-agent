@@ -30,6 +30,13 @@ services:
       # 本地演示默认 local；设 APP_ENV=prod 时必须同时设置 JWT_SECRET，否则后端拒绝启动
       APP__ENV: ${APP_ENV:-local}
       AUTH__JWT_SECRET: ${JWT_SECRET:-dev-insecure-jwt-secret-change-me-please}
+      # 条款入库（M2）：密钥从 deploy/.env 或 shell 环境变量读取，不写进本文件
+      RAG__DATA_DIR: /data
+      RAG__MINERU_TOKEN: ${MINERU_TOKEN:-}
+      RAG__DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+    volumes:
+      # 原始 PDF 与解析缓存放在宿主机，容器重建不丢
+      - ../data:/data
     depends_on:
       postgres:
         condition: service_healthy

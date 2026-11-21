@@ -4,9 +4,10 @@
 """
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, SecretStr, model_validator
+from pydantic import BaseModel, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -30,6 +31,44 @@ class LogSettings(BaseModel):
     json_format: bool = False  # 本地用彩色控制台，容器内设为 true 输出 JSON
 
 
+# 仓库根目录下的 data/；容器里通过卷挂载到 /data
+DEFAULT_DATA_DIR = Path(__file__).resolve().parents[3] / "data"
+
+
+class RagSettings(BaseModel):
+    data_dir: Path = DEFAULT_DATA_DIR
+
+    # MinerU 云端解析（https://mineru.net）
+    mineru_token: SecretStr | None = None
+    mineru_timeout_seconds: int = 600
+
+    # 阿里云 DashScope：OpenAI 兼容接口，向量化与重排共用一个 Key
+    dashscope_api_key: SecretStr | None = None
+    dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    embedding_model: str = "text-embedding-v4"
+    embedding_dim: int = 1024  # 改动需要同步修改迁移里的 vector(1024)
+    embedding_batch_size: int = 10  # DashScope 单次最多 10 条
+
+    # 切分参数（字符数）
+    parent_max_chars: int = 2500
+    child_chars: int = 400
+    child_overlap: int = 60
+
+    @field_validator("mineru_token", "dashscope_api_key", mode="before")
+    @classmethod
+    def _blank_as_none(cls, v: object) -> object:
+        # docker compose 里 ${VAR:-} 未设置时传进来的是空字符串，视为未配置
+        return None if isinstance(v, str) and not v.strip() else v
+
+    @property
+    def clauses_dir(self) -> Path:
+        return self.data_dir / "raw" / "clauses"
+
+    @property
+    def parsed_dir(self) -> Path:
+        return self.data_dir / "parsed"
+
+
 DEV_JWT_SECRET = "dev-insecure-jwt-secret-change-me-please"
 
 
@@ -51,6 +90,7 @@ class Settings(BaseSettings):
     db: DatabaseSettings = DatabaseSettings()
     log: LogSettings = LogSettings()
     auth: AuthSettings = AuthSettings()
+    rag: RagSettings = RagSettings()
 
     @model_validator(mode="after")
     def _reject_dev_secret_in_prod(self) -> "Settings":
