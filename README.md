@@ -2,7 +2,9 @@
 
 基于 RAG + LangGraph 的保险顾问 Agent：条款问答（带出处）、需求采集与推荐、按费率表精确报价、理赔咨询。
 
-设计文档见 [docs/SPEC.md](docs/SPEC.md)。
+- 设计文档：[docs/SPEC.md](docs/SPEC.md)
+- 面试故事集：[docs/INTERVIEW.md](docs/INTERVIEW.md)
+- 开发约定（也供 Claude Code 使用）：[CLAUDE.md](CLAUDE.md)
 
 ## 目录
 
