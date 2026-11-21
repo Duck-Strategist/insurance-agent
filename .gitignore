@@ -1,0 +1,40 @@
+# ---- 密钥与本地配置 ----
+.env
+.env.*
+!.env.example
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+.ipynb_checkpoints/
+
+# ---- Node / 前端 ----
+node_modules/
+dist/
+*.tsbuildinfo
+.vite/
+coverage/
+
+# ---- 数据 ----
+# 原始 PDF 与解析产物较大，不入库（评测集 data/eval/ 需要入库）
+data/raw/
+data/parsed/
+data/cache/
+
+# ---- 评测运行产物 ----
+eval/reports/*.local.*
+
+# ---- IDE / 系统 ----
+.idea/
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
+Thumbs.db
+*.log
