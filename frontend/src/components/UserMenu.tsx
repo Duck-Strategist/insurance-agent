@@ -1,9 +1,10 @@
 import { LogoutOutlined, UserOutlined } from '@ant-design/icons'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { Button, Dropdown } from 'antd'
 import { useLocation, useNavigate } from 'react-router'
 
 import { authApi } from '../lib/api'
+import { queryKeys } from '../lib/queryKeys'
 import { useAuthStore } from '../stores/auth'
 
 /** 顶栏右侧：未登录显示登录按钮；已登录显示用户名和退出。 */
@@ -14,11 +15,10 @@ export function UserMenu() {
   const logout = useAuthStore((s) => s.logout)
   const navigate = useNavigate()
   const location = useLocation()
-  const queryClient = useQueryClient()
 
   // 页面加载时用 /me 校验本地 token：过期会 401，request() 会自动清掉登录态
   useQuery({
-    queryKey: ['me', token],
+    queryKey: queryKeys.currentUser,
     queryFn: async () => {
       const me = await authApi.me()
       setUser(me)
@@ -47,8 +47,8 @@ export function UserMenu() {
         items: [{ key: 'logout', icon: <LogoutOutlined />, label: '退出登录' }],
         onClick: ({ key }) => {
           if (key === 'logout') {
+            // 个人数据缓存由 Providers 在登录态变化时统一清理
             logout()
-            queryClient.removeQueries({ queryKey: ['me'] })
             navigate('/')
           }
         },

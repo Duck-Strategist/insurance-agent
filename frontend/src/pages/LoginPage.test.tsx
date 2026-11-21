@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor } from '@testing-library/react'
 
 import { useAuthStore } from '../stores/auth'
 import { healthOk, jsonResponse, mockFetch, renderAt } from '../test/utils'
@@ -60,6 +60,32 @@ test('注册时前端校验用户名格式，不发请求', async () => {
   fillAndSubmit('a!', 'password123', '注册并登录')
   expect(await screen.findByText('3-32 位字母、数字或下划线')).toBeInTheDocument()
   expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/auth/register'))).toBe(false)
+})
+
+test('换号登录时不会沿用上一个用户的个人数据缓存', async () => {
+  const users = [
+    { id: 1, username: 'alice', role: 'user' },
+    { id: 2, username: 'bob', role: 'user' },
+  ]
+  let current = 0
+  const fetchMock = mockFetch({
+    '/health': healthOk,
+    '/api/v1/auth/me': () => jsonResponse(users[current]),
+  })
+  const meCalls = () => fetchMock.mock.calls.filter(([u]) => String(u).includes('/auth/me')).length
+  useAuthStore.setState({ token: 't-alice', user: users[0] as never })
+  renderAt('/')
+  expect(await screen.findByRole('button', { name: /alice/ })).toBeInTheDocument()
+
+  // 模拟 alice 退出、bob 登录；若缓存未清，/me 的旧结果（alice）会覆盖 bob
+  act(() => useAuthStore.getState().logout())
+  current = 1
+  act(() => useAuthStore.getState().setAuth('t-bob', users[1] as never))
+
+  expect(await screen.findByRole('button', { name: /bob/ })).toBeInTheDocument()
+  // 缓存被清掉才会为 bob 重新请求 /me；否则 5 分钟 staleTime 内直接用 alice 的缓存
+  await waitFor(() => expect(meCalls()).toBe(2))
+  expect(useAuthStore.getState().user?.username).toBe('bob')
 })
 
 test('本地 token 已失效时，/me 返回 401 会自动退出登录', async () => {

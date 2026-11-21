@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+import anyio.to_thread
 import jwt
 from pwdlib import PasswordHash
 
@@ -24,6 +25,16 @@ def verify_password(password: str, password_hash: str | None) -> bool:
         _password_hash.verify(password, _DUMMY_HASH)
         return False
     return _password_hash.verify(password, password_hash)
+
+
+# Argon2 是 CPU 密集的同步计算（每次几十毫秒），在 async 路由里直接调用会阻塞事件循环，
+# 卡住同进程的其他请求（包括流式对话）。异步代码一律用下面两个版本，放到线程池执行。
+async def hash_password_async(password: str) -> str:
+    return await anyio.to_thread.run_sync(hash_password, password)
+
+
+async def verify_password_async(password: str, password_hash: str | None) -> bool:
+    return await anyio.to_thread.run_sync(verify_password, password, password_hash)
 
 
 @dataclass(frozen=True)

@@ -1,8 +1,9 @@
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Product
@@ -91,9 +92,33 @@ async def test_detail_404_for_missing_or_inactive(
     assert (await client.get("/api/v1/products/999999999")).status_code == 404
 
 
-async def test_seed_is_idempotent(db_session: AsyncSession) -> None:
+async def test_seed_is_idempotent_and_keeps_edits(db_session: AsyncSession) -> None:
     await db_session.execute(delete(Product))
     assert await seed_products(db_session) == 12
-    assert await seed_products(db_session) == 12
-    count = await db_session.scalar(select(func.count()).select_from(Product))
-    assert count == 12
+    # 模拟后台修改过某个产品
+    await db_session.execute(
+        update(Product).where(Product.name == "太保福有余2025").values(description="后台改过")
+    )
+    # 默认模式只补缺失的，不覆盖已有数据（容器每次启动都会执行）
+    assert await seed_products(db_session) == 0
+    assert await db_session.scalar(select(func.count()).select_from(Product)) == 12
+    edited = await db_session.scalar(
+        select(Product.description).where(Product.name == "太保福有余2025")
+    )
+    assert edited == "后台改过"
+
+
+async def test_seed_overwrite_restores_and_bumps_updated_at(db_session: AsyncSession) -> None:
+    await db_session.execute(delete(Product))
+    await seed_products(db_session)
+    old = datetime(2020, 1, 1, tzinfo=UTC)
+    await db_session.execute(update(Product).values(description="后台改过", updated_at=old))
+
+    assert await seed_products(db_session, overwrite=True) == 12
+    row = (
+        await db_session.execute(
+            select(Product.description, Product.updated_at).where(Product.name == "太保福有余2025")
+        )
+    ).one()
+    assert row.description == "终身寿险分红型产品。"
+    assert row.updated_at > old

@@ -38,6 +38,8 @@ jobs:
           uv run alembic upgrade head
           uv run alembic downgrade base
           uv run alembic upgrade head
+      - name: ORM 模型与迁移一致（忘记生成迁移时失败）
+        run: uv run alembic check
       - run: uv run pytest -q
 
   frontend:

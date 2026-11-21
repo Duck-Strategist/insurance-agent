@@ -1,9 +1,11 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { Alert, Col, Empty, Flex, Pagination, Row, Segmented, Skeleton, Typography } from 'antd'
+import { useEffect } from 'react'
 import { useSearchParams } from 'react-router'
 
 import { ProductCard } from '../components/ProductCard'
 import { productApi } from '../lib/api'
+import { parsePage } from '../lib/navigation'
 import { CATEGORY_LABELS, type ProductCategory } from '../lib/types'
 
 const PAGE_SIZE = 12
@@ -21,13 +23,29 @@ export function ProductsPage() {
   // 筛选与页码放在 URL 里：可分享、刷新不丢、浏览器后退可用
   const [params, setParams] = useSearchParams()
   const category = parseCategory(params.get('category'))
-  const page = Math.max(1, Number(params.get('page')) || 1)
+  const page = parsePage(params.get('page'))
 
-  const { data, isPending, isError, error } = useQuery({
+  const { data, isPending, isError, error, isPlaceholderData } = useQuery({
     queryKey: ['products', category ?? ALL, page],
     queryFn: () => productApi.list({ category, page, pageSize: PAGE_SIZE }),
     placeholderData: keepPreviousData,
   })
+
+  // 页码越界（旧链接、产品下架后总页数变少）：跳到最后一页，而不是显示"暂无产品"
+  const lastPage = data ? Math.max(1, Math.ceil(data.total / PAGE_SIZE)) : 1
+  const outOfRange = !isPlaceholderData && data !== undefined && data.total > 0 && page > lastPage
+  useEffect(() => {
+    if (!outOfRange) return
+    setParams(
+      (prev) => {
+        const p = new URLSearchParams(prev)
+        if (lastPage <= 1) p.delete('page')
+        else p.set('page', String(lastPage))
+        return p
+      },
+      { replace: true },
+    )
+  }, [outOfRange, lastPage, setParams])
 
   const update = (next: { category?: string; page?: number }) => {
     const p = new URLSearchParams(params)
@@ -58,7 +76,7 @@ export function ProductsPage() {
 
       {isError ? (
         <Alert type="error" showIcon message="产品加载失败" description={error.message} />
-      ) : isPending ? (
+      ) : isPending || outOfRange ? (
         <Skeleton active paragraph={{ rows: 6 }} />
       ) : data.items.length === 0 ? (
         <Empty description="暂无产品" />

@@ -1,6 +1,8 @@
-"""演示数据：按产品名幂等写入，重复执行只会更新，不会重复插入。
+"""演示数据：按产品名幂等写入，重复执行不会重复插入。
 
-用法：uv run python -m app.seed
+用法：
+  uv run python -m app.seed              只补缺失的产品（容器启动时执行）
+  uv run python -m app.seed --overwrite  用种子文件覆盖同名产品
 """
 
 import json
@@ -8,6 +10,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,37 +33,50 @@ def load_products() -> list[dict[str, Any]]:
     return rows
 
 
-async def seed_products(session: AsyncSession) -> int:
+SEED_COLUMNS = (
+    "category",
+    "insurer",
+    "description",
+    "target_group",
+    "highlights",
+    "min_premium",
+    "max_premium",
+    "clause_file",
+)
+
+
+async def seed_products(session: AsyncSession, *, overwrite: bool = False) -> int:
+    """写入演示产品，返回实际插入或更新的行数。
+
+    默认只补缺失的产品，不改已有数据（容器每次启动都会执行，不能覆盖后台改过的内容）；
+    overwrite=True 时用种子文件覆盖同名产品，并刷新 updated_at。
+    """
     rows = load_products()
     stmt = insert(Product).values(rows)
-    stmt = stmt.on_conflict_do_update(
-        index_elements=[Product.name],
-        set_={
-            col: stmt.excluded[col]
-            for col in (
-                "category",
-                "insurer",
-                "description",
-                "target_group",
-                "highlights",
-                "min_premium",
-                "max_premium",
-                "clause_file",
-            )
-        },
-    )
-    await session.execute(stmt)
+    if overwrite:
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[Product.name],
+            set_={
+                **{col: stmt.excluded[col] for col in SEED_COLUMNS},
+                # ORM 的 onupdate 对 INSERT ... ON CONFLICT 不生效，需要显式设置
+                "updated_at": func.now(),
+            },
+        )
+    else:
+        stmt = stmt.on_conflict_do_nothing(index_elements=[Product.name])
+    result = await session.execute(stmt.returning(Product.id))
+    affected = len(result.all())
     await session.commit()
-    return len(rows)
+    return affected
 
 
-async def main() -> None:
+async def main(overwrite: bool = False) -> None:
     settings = get_settings()
     configure_logging(settings.log.level, settings.log.json_format)
     db = Database(settings.db)
     try:
         async with db.session_factory() as session:
-            count = await seed_products(session)
-        logger.info("seed.products", count=count)
+            count = await seed_products(session, overwrite=overwrite)
+        logger.info("seed.products", affected=count, overwrite=overwrite)
     finally:
         await db.dispose()

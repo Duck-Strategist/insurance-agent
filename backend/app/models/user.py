@@ -20,4 +20,6 @@ class User(TimestampMixin, Base):
     # 统一存小写，唯一约束即大小写不敏感
     username: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    role: Mapped[str] = mapped_column(String(16), nullable=False, default=UserRole.USER)
+    role: Mapped[str] = mapped_column(
+        String(16), nullable=False, default=UserRole.USER, server_default=UserRole.USER.value
+    )

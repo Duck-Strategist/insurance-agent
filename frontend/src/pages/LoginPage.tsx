@@ -4,14 +4,10 @@ import { useState } from 'react'
 import { Navigate, useLocation, useNavigate } from 'react-router'
 
 import { authApi, type Credentials } from '../lib/api'
+import { safeRedirect } from '../lib/navigation'
 import { useAuthStore } from '../stores/auth'
 
 type Mode = 'login' | 'register'
-
-/** 只允许站内相对路径，防止 ?from=https://evil.com 这类开放重定向 */
-function safeRedirect(from: unknown): string {
-  return typeof from === 'string' && from.startsWith('/') && !from.startsWith('//') ? from : '/'
-}
 
 export function LoginPage() {
   const [mode, setMode] = useState<Mode>('login')

@@ -1,7 +1,7 @@
 from decimal import Decimal
 from enum import StrEnum
 
-from sqlalchemy import BigInteger, CheckConstraint, Index, Numeric, String, Text
+from sqlalchemy import BigInteger, CheckConstraint, Index, Numeric, String, Text, text
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -37,12 +37,21 @@ class Product(TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(200), unique=True, nullable=False)
     category: Mapped[str] = mapped_column(String(32), nullable=False)
     insurer: Mapped[str] = mapped_column(String(120), nullable=False)
-    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    target_group: Mapped[str] = mapped_column(String(200), nullable=False, default="")
-    highlights: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, default=list)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    target_group: Mapped[str] = mapped_column(
+        String(200), nullable=False, default="", server_default=""
+    )
+    highlights: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, default=list, server_default=text("'{}'::text[]")
+    )
     # 起保费；终身寿险等按保额计费的产品只有下限，max_premium 为空
     min_premium: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     max_premium: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     # 条款 PDF 文件名，M2 入库时用来关联文档
     clause_file: Mapped[str | None] = mapped_column(String(300))
-    status: Mapped[str] = mapped_column(String(16), nullable=False, default=ProductStatus.ACTIVE)
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default=ProductStatus.ACTIVE,
+        server_default=ProductStatus.ACTIVE.value,
+    )

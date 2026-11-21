@@ -54,6 +54,23 @@ test('切换分类会按 category 请求并只显示该类产品', async () => {
   expect(urls.some((u) => u.includes('category=life'))).toBe(true)
 })
 
+test('页码越界时自动跳到最后一页', async () => {
+  mockFetch({ '/health': healthOk, '/api/v1/products': productsHandler })
+  const { router } = renderAt('/products?category=life&page=9')
+  // 寿险只有 2 个，只有 1 页 → 去掉 page 参数，显示产品而不是"暂无产品"
+  expect(await screen.findByText('寿险乙')).toBeInTheDocument()
+  expect(router.state.location.search).toBe('?category=life')
+  expect(screen.queryByText('暂无产品')).not.toBeInTheDocument()
+})
+
+test('小数页码按整数请求，不报错', async () => {
+  const fetchMock = mockFetch({ '/health': healthOk, '/api/v1/products': productsHandler })
+  renderAt('/products?page=1.7')
+  expect(await screen.findByText('医疗险甲')).toBeInTheDocument()
+  const urls = fetchMock.mock.calls.map(([u]) => String(u)).filter((u) => u.includes('products'))
+  expect(urls.every((u) => u.includes('page=1&'))).toBe(true)
+})
+
 test('详情页 404 显示“产品不存在”', async () => {
   mockFetch({
     '/health': healthOk,
