@@ -89,7 +89,7 @@
 │ infra/     DB、LLM/Embedding/Rerank 客户端、日志、追踪  │
 └───────────────┬───────────────────────────────────────┘
                 │
-   PostgreSQL 16 + pgvector（业务表 / 向量 / tsvector / checkpointer）
+   PostgreSQL 17 + pgvector（业务表 / 向量 / tsvector / checkpointer）
    外部：DeepSeek、DashScope（embedding + rerank）、MinerU
 ```
 
