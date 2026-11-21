@@ -4,6 +4,8 @@
 请求内通过 app.api.deps.get_session 依赖拿到会话。
 """
 
+import asyncio
+
 from sqlalchemy import MetaData, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -13,6 +15,12 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase
 
 from app.core.config import DatabaseSettings
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
+
+# 就绪检查的连接超时；asyncpg 默认要等 60 秒
+PING_TIMEOUT_SECONDS = 3.0
 
 # 统一约束命名，Alembic 自动生成迁移时名字稳定
 NAMING_CONVENTION = {
@@ -40,11 +48,14 @@ class Database:
         self.session_factory = async_sessionmaker(self.engine, expire_on_commit=False)
 
     async def ping(self) -> bool:
+        """就绪检查用：超时或失败返回 False，并记录原因方便排查。"""
         try:
-            async with self.engine.connect() as conn:
-                await conn.execute(text("SELECT 1"))
+            async with asyncio.timeout(PING_TIMEOUT_SECONDS):
+                async with self.engine.connect() as conn:
+                    await conn.execute(text("SELECT 1"))
             return True
-        except Exception:
+        except Exception as exc:
+            logger.warning("db.ping_failed", error=type(exc).__name__, detail=str(exc)[:200])
             return False
 
     async def dispose(self) -> None:

@@ -50,9 +50,17 @@ def configure_logging(level: str = "INFO", json_format: bool = False) -> None:
     root.addHandler(handler)
     root.setLevel(level.upper())
 
-    # uvicorn 自带 access 日志与我们的请求日志重复，关掉
-    logging.getLogger("uvicorn.access").handlers.clear()
-    logging.getLogger("uvicorn.access").propagate = False
+    # uvicorn 启动时会给自己的 logger 装 handler 且不向 root 传播，
+    # 这里清掉 handler 并改为传播，让它们也走上面的 JSON/控制台渲染器
+    for name in ("uvicorn", "uvicorn.error"):
+        uvicorn_logger = logging.getLogger(name)
+        uvicorn_logger.handlers.clear()
+        uvicorn_logger.propagate = True
+
+    # uvicorn 自带 access 日志与我们的 http.request 日志重复，关掉
+    access_logger = logging.getLogger("uvicorn.access")
+    access_logger.handlers.clear()
+    access_logger.propagate = False
 
 
 def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:

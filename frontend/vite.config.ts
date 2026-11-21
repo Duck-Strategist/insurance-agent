@@ -7,10 +7,11 @@ const BACKEND = process.env.VITE_BACKEND_URL ?? 'http://localhost:8000'
 export default defineConfig({
   plugins: [react()],
   server: {
-    // 开发时把接口代理到本地后端，前端代码里统一用相对路径
+    // 开发时把接口代理到本地后端，前端代码里统一用相对路径。
+    // 以 ^ 开头的 key 按正则匹配：只代理 /api/... 和 /health、/health/...，与 nginx.conf 保持一致
     proxy: {
-      '/api': { target: BACKEND, changeOrigin: true },
-      '/health': { target: BACKEND, changeOrigin: true },
+      '^/api/': { target: BACKEND, changeOrigin: true },
+      '^/health(/|$)': { target: BACKEND, changeOrigin: true },
     },
   },
   test: {
