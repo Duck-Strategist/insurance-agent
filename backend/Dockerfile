@@ -24,5 +24,5 @@ ENV PATH="/app/.venv/bin:$PATH" \
 USER app
 EXPOSE 8000
 
-# 启动前先执行迁移，再用 exec 让 uvicorn 接管 PID 1，才能收到 SIGTERM 并优雅关闭
-CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+# 启动前先执行迁移、写入演示产品（幂等），再用 exec 让 uvicorn 接管 PID 1，才能收到 SIGTERM 并优雅关闭
+CMD ["sh", "-c", "alembic upgrade head && python -m app.seed && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"]

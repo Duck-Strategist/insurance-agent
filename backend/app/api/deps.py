@@ -1,10 +1,57 @@
 from collections.abc import AsyncIterator
+from typing import Annotated
 
-from fastapi import Request
+from fastapi import Depends, HTTPException, Request, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.config import Settings, get_settings
+from app.core.security import InvalidTokenError, decode_access_token
+from app.models import User
 
 
 async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
     """请求级数据库会话：路由中用 `Depends(get_session)` 获取。"""
     async with request.app.state.db.session_factory() as session:
         yield session
+
+
+def get_app_settings(request: Request) -> Settings:
+    # create_app(settings) 传入的配置优先，便于测试注入
+    settings: Settings | None = getattr(request.app.state, "settings", None)
+    return settings or get_settings()
+
+
+SessionDep = Annotated[AsyncSession, Depends(get_session)]
+SettingsDep = Annotated[Settings, Depends(get_app_settings)]
+
+_bearer = HTTPBearer(auto_error=False)
+
+
+def _unauthorized(detail: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=detail,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+async def get_current_user(
+    session: SessionDep,
+    settings: SettingsDep,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+) -> User:
+    if credentials is None:
+        raise _unauthorized("未登录")
+    try:
+        payload = decode_access_token(credentials.credentials, settings.auth)
+    except InvalidTokenError:
+        raise _unauthorized("登录已失效，请重新登录") from None
+    # 每次都查库：用户被删除后旧 token 立即失效，角色也以数据库为准
+    user = await session.get(User, payload.user_id)
+    if user is None:
+        raise _unauthorized("登录已失效，请重新登录")
+    return user
+
+
+CurrentUser = Annotated[User, Depends(get_current_user)]

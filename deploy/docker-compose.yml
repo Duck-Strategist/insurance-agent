@@ -27,7 +27,9 @@ services:
     build: ../backend
     environment:
       DB__URL: postgresql+asyncpg://${POSTGRES_USER:-insurance}:${POSTGRES_PASSWORD:-insurance}@postgres:5432/${POSTGRES_DB:-insurance}
-      APP__ENV: prod
+      # 本地演示默认 local；设 APP_ENV=prod 时必须同时设置 JWT_SECRET，否则后端拒绝启动
+      APP__ENV: ${APP_ENV:-local}
+      AUTH__JWT_SECRET: ${JWT_SECRET:-dev-insecure-jwt-secret-change-me-please}
     depends_on:
       postgres:
         condition: service_healthy
