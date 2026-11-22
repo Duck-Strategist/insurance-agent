@@ -12,6 +12,7 @@ import { LoginPage } from '../pages/LoginPage'
 import { NotFoundPage } from '../pages/NotFoundPage'
 import { ProductDetailPage } from '../pages/ProductDetailPage'
 import { ProductsPage } from '../pages/ProductsPage'
+import { PlansPage } from '../pages/PlansPage'
 import { QuotesPage } from '../pages/QuotesPage'
 
 export const routes: RouteObject[] = [
@@ -28,6 +29,14 @@ export const routes: RouteObject[] = [
         element: (
           <RequireLogin>
             <ChatPage />
+          </RequireLogin>
+        ),
+      },
+      {
+        path: 'plans',
+        element: (
+          <RequireLogin>
+            <PlansPage />
           </RequireLogin>
         ),
       },

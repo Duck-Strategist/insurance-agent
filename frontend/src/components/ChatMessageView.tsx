@@ -3,7 +3,8 @@ import { Avatar, Collapse, Flex, Tag, Tooltip, Typography } from 'antd'
 import { Fragment, useMemo, useState } from 'react'
 
 import { splitLine } from '../lib/answer'
-import type { Citation } from '../lib/types'
+import type { Citation, PlanAction, PlanCardData } from '../lib/types'
+import { PlanCard } from './PlanCard'
 
 function AnswerText({
   text,
@@ -82,12 +83,19 @@ export function ChatMessageView({
   content,
   citations = [],
   status,
+  plan,
+  planBusy,
+  onPlanAction,
 }: {
   role: 'user' | 'assistant'
   content: string
   citations?: Citation[]
   /** 生成中的状态提示（正在检索条款…） */
   status?: string | null
+  /** 顾问方案卡片 */
+  plan?: PlanCardData | null
+  planBusy?: boolean
+  onPlanAction?: (plan: PlanCardData, action: PlanAction) => void
 }) {
   const [active, setActive] = useState<string[]>([])
   const isUser = role === 'user'
@@ -123,6 +131,13 @@ export function ChatMessageView({
         </div>
         {!isUser && citations.length > 0 && (
           <CitationList citations={citations} active={active} onChange={setActive} />
+        )}
+        {!isUser && plan && (
+          <PlanCard
+            plan={plan}
+            busy={planBusy}
+            onAction={onPlanAction ? (action) => onPlanAction(plan, action) : undefined}
+          />
         )}
       </Flex>
       {isUser && <Avatar icon={<UserOutlined />} style={{ flex: 'none' }} />}

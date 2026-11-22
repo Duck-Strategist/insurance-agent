@@ -2,7 +2,7 @@
 
 安心保 · 智能保险顾问：RAG + LangGraph 的保险顾问 Agent（学习 + 面试作品项目）。
 
-- 设计与决策：[docs/SPEC.md](docs/SPEC.md)（决策 D1–D45、里程碑 M0–M9、风险 Q1–Q18）。做设计取舍前先查，取舍定了就补一条决策。
+- 设计与决策：[docs/SPEC.md](docs/SPEC.md)（决策 D1–D50、里程碑 M0–M9、风险 Q1–Q20）。做设计取舍前先查，取舍定了就补一条决策。
 - 面试故事集：[docs/INTERVIEW.md](docs/INTERVIEW.md)。每个里程碑结束后补充（见「工作流程」）。
 - 参考实现 `../hm-insurance/` 是教学项目，只读对照，不复制代码，它的 `.env` 里有泄露过的密钥，不要使用。
 
@@ -89,6 +89,10 @@ npm run lint ; npx tsc -b ; npm run test ; npm run build
 - 改了提示词要在真实模型上跑对话验证；影响检索的改动（改写提示词）要跑 `python -m app.eval retrieval --rewrite --keep-original`。
 - **提示词里的示例不能取自评测集**（包括看过的失败案例）：曾把难题集错题的口语→术语映射写进改写提示词，难题集 R@5 虚高到 0.971，去掉后只有 0.912，比不改写还差（spec Q16）。
 - 测试用 `tests/test_agent.py` 的 `make_runtime`（脚本化假 LLM + 假检索器 + InMemorySaver）。
+- 顾问（M6）：选险种、产品、保额是 `app/agent/advisor.py` 的规则，LLM 只抽槽位和写说明（D47）；说明里出现金额或「投保」会被换成模板（`graph.AMOUNT` / `MISLEADING`）。
+- interrupt 只放在 `advisor_review` 节点（恢复时被中断的节点会从头重跑，D49）；有副作用的操作（落库、调模型、推卡片）放在它之前的节点。
+- 会话停在方案确认时，`/chat` 的消息会作为恢复值交给 `advisor_review`（D48）；方案状态只能从 pending 改出（`PlanService.transition`）。
+- 删除会话、用户时要处理它们的 checkpoint 和待确认方案（Q17、D46）。
 - checkpointer 的表由 `AsyncPostgresSaver.setup()` 管理，`migrations/env.py` 的 `include_name` 把它们排除在 Alembic 之外。
 
 ## 报价约定

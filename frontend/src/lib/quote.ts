@@ -1,4 +1,4 @@
-import type { QuoteParams, QuoteParamSpec } from './types'
+import type { PlanAction, PlanCardData, QuoteParams, QuoteParamSpec } from './types'
 
 /** 表单值 → 报价参数：去掉未填项，金额去空格后按字符串提交。 */
 export function toQuoteParams(
@@ -58,4 +58,16 @@ export function describeParams(params: QuoteParams): string {
     else parts.push(VALUE_LABELS[String(v)] ?? String(v))
   }
   return parts.join(' · ')
+}
+
+/** 方案卡片操作写进对话的那句话，与后端 graph.edit_label 一致（历史消息去重依赖它）。 */
+export function planActionLabel(plan: PlanCardData, action: PlanAction): string {
+  if (action.action === 'confirm') return '确认方案'
+  if (action.action === 'cancel') return '取消方案'
+  const parts: string[] = []
+  const swap = plan.items.filter((i) => action.remove_product_ids.includes(i.product_id))
+  if (swap.length) parts.push('换一款：' + swap.map((i) => i.product_name).join('、'))
+  const drop = plan.items.filter((i) => action.remove_categories.includes(i.category))
+  if (drop.length) parts.push('不要：' + drop.map((i) => i.category_label).join('、'))
+  return parts.join('；')
 }

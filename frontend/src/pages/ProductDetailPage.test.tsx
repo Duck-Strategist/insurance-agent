@@ -1,7 +1,7 @@
 import { fireEvent, screen, waitFor } from '@testing-library/react'
 
-import { describeParams, toQuoteParams } from '../lib/quote'
-import type { PricingInfo, Product, QuoteResult } from '../lib/types'
+import { describeParams, planActionLabel, toQuoteParams } from '../lib/quote'
+import type { PlanCardData, PricingInfo, Product, QuoteResult } from '../lib/types'
 import { healthOk, jsonResponse, mockFetch, renderAt } from '../test/utils'
 
 afterEach(() => vi.unstubAllGlobals())
@@ -197,4 +197,22 @@ test('非必填的单选有「不选」，选它时不提交该参数', async ()
   await screen.findByText('¥28,180')
   const call = fetchMock.mock.calls.find(([u]) => String(u).endsWith('/quote'))!
   expect(JSON.parse(String(call[1]?.body)).params).not.toHaveProperty('multi_pay')
+})
+
+test('planActionLabel 与后端写进对话的文字一致', () => {
+  const plan = {
+    plan_id: 1,
+    slots: {},
+    budget: '1000.00',
+    total_annual_premium: '300.00',
+    dropped: [],
+    items: [
+      { product_id: 1, product_name: '甲医疗', category: 'medical' as const, category_label: '医疗险' },
+      { product_id: 2, product_name: '乙意外', category: 'accident' as const, category_label: '意外险' },
+    ],
+  } as unknown as PlanCardData
+  expect(planActionLabel(plan, { action: 'edit', remove_product_ids: [1], remove_categories: ['accident'] })).toBe(
+    '换一款：甲医疗；不要：意外险',
+  )
+  expect(planActionLabel(plan, { action: 'confirm' })).toBe('确认方案')
 })

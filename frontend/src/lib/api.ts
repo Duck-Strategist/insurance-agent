@@ -10,9 +10,11 @@ import type {
   EvalRun,
   Page,
   ParentPage,
+  PlanAction,
   PricingInfo,
   Product,
   ProductCategory,
+  SavedPlan,
   QuoteParams,
   QuoteResult,
   SavedQuote,
@@ -168,14 +170,29 @@ export const chatApi = {
   messages: (id: string) => request<ChatMessage[]>(`/api/v1/threads/${id}/messages`),
 
   /** 发送消息并逐个产出 SSE 事件。不传 threadId 时后端新建会话，第一个事件是 thread。 */
-  async *stream(
-    body: { thread_id?: string; message: string },
+  stream: (body: { thread_id?: string; message: string }, signal?: AbortSignal) =>
+    streamEvents('/api/v1/chat', body, signal),
+
+  /** 方案卡片上的操作（确认 / 取消 / 去掉某几项），事件与 stream 相同 */
+  resume: (
+    body: { thread_id: string; plan_id: number } & PlanAction,
     signal?: AbortSignal,
-  ): AsyncGenerator<ChatEvent> {
-    const response = await send('/api/v1/chat', { method: 'POST', body: json(body), signal })
-    if (!response.body) throw new ApiError(response.status, '服务器没有返回内容')
-    for await (const { event, data } of readSse(response.body)) {
-      yield { type: event, ...(JSON.parse(data) as object) } as ChatEvent
-    }
-  },
+  ) => streamEvents('/api/v1/chat/resume', body, signal),
+}
+
+async function* streamEvents(
+  path: string,
+  body: object,
+  signal?: AbortSignal,
+): AsyncGenerator<ChatEvent> {
+  const response = await send(path, { method: 'POST', body: json(body), signal })
+  if (!response.body) throw new ApiError(response.status, '服务器没有返回内容')
+  for await (const { event, data } of readSse(response.body)) {
+    yield { type: event, ...(JSON.parse(data) as object) } as ChatEvent
+  }
+}
+
+// ---- 我的方案 ----
+export const planApi = {
+  list: () => request<SavedPlan[]>('/api/v1/plans'),
 }

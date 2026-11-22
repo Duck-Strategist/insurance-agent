@@ -384,10 +384,10 @@ async def test_unimplemented_intents_get_coming_soon(
     session_factory: async_sessionmaker[AsyncSession], products: dict[str, int]
 ) -> None:
     rt, _, _, retr = make_runtime(
-        session_factory, json_replies=[route("advisor", []), route("other", [])]
+        session_factory, json_replies=[route("claim", []), route("other", [])]
     )
-    assert text_of(await ask(rt, "帮我推荐个重疾险")) == prompts.COMING_SOON["advisor"]
-    assert (await state(rt))["last_workflow"] == "advisor"
+    assert text_of(await ask(rt, "住院了怎么理赔")) == prompts.COMING_SOON["claim"]
+    assert (await state(rt))["last_workflow"] == "claim"
     assert text_of(await ask(rt, "今天天气怎么样")) == prompts.OUT_OF_SCOPE
     assert retr.calls == []
 

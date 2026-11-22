@@ -55,6 +55,11 @@
 | D43 | 费率表提取按表格线取单元格（pdfplumber），不按空格切文本；每个提取函数先逐列核对表头文字再按固定列映射取值；提取后跑结构校验（年龄区间无重叠无缺口、正数）和业务校验（交费期越长每千元保费对应保额越高、同列随年龄不增、无社保不低于有社保、计划档次递增），任何一项不过就不写文件 | 高龄行的空白格不在行尾：福有余 59 岁有 9 年交没有 10 年交、新华 61 岁起只有趸交且男女各一列，按文本切分会让数字整体左移到别的列；列映射写错时结构上看不出来，只有业务规律能发现（有测试：对调两列后校验必须报错） |
 | D44 | 几百页的长表（一行一条记录）用 pypdfium2 取每个字符的坐标自己拼行：按字符底边分行、按横向间隔切字段，每行字段数与格式严格校验；重疾的「可选责任组合 → 计划编号」写在代码里（达尔文终身计划是混合进制：1 + 48×身故 + 24×疾病关爱 + 12×恶性肿瘤津贴 + 6×保费补偿 + 3×顶梁柱 + 多次给付 0/1/2），提取时与 PDF 的计划对照表逐行核对，读不全的行再用「加选一项责任保费必须更高」的业务校验兜底 | pdfplumber 处理 887 页超过 10 分钟仍未完成，pypdfium2 自带的整页文本又会把一行拆成几行；小数点比数字矮，按字符中心分行会被单独拆成一行。计划对照表第 1 页有 25 行的说明文字折行、字段拼不完整，不能只靠它（第 264 页的计划 48 就是其中之一，用它独立验证了映射） |
 | D45 | 解析好的费率表按 `rate_books.id` 在进程内缓存（LRU 32 份），只在未命中时从库里取 content 并在线程池解析；报价记录引用的版本不带内容 | 达尔文12号一份 6 MB、5 万格：不缓存时每次报价都要从库里取 6 MB 并解析约 0.4 秒；rate_books 行写入后不再修改（新版本是新行），id 就能代表内容 |
+| D46 | 方案落库在生成卡片时（status=pending），状态 pending → confirmed / cancelled / superseded（被调整取代）/ expired（转去聊别的、会话被删）；只有 pending 能改状态（条件 UPDATE），恢复请求必须带上会话当前待确认的 plan_id。修订 §4 的 draft/confirmed | 「我的方案」要能看到待确认的方案；调整后旧卡片还在聊天记录里，旧卡片上的按钮必须失效（409），重复点击确认只生效一次 |
+| D47 | 顾问的分工：LLM 只抽取需求槽位（JSON，代码逐项校验）和写几句说明；选险种、选产品、定保额由代码规则决定（医疗 > 重疾 > 意外，寿险只在用户要求时配；每个险种取保费最低的可投保产品，重疾从 50 万往下取预算内最高一档），保费全部来自报价引擎；说明里出现金额（阿拉伯数字或中文数字）或「投保」就换成固定模板 | 推荐是写操作、数字要可复现（D11）。M6 实测：提示词里禁止了，qwen-plus 仍会写「可以随时确认投保」，还会编产品的保障细节，提示词约束不住的只能在代码里兜底 |
+| D48 | 会话停在方案确认（interrupt）时，用户直接打字也作为恢复值交给 advisor_review：模型判断 confirm / cancel / modify / other；modify 合并槽位后重新配方案，other（如问条款）把方案标为 expired 并把这句话交给路由按普通消息处理 | 用户不会只点按钮。如果新消息另起一轮，中断会悬空、卡片按钮无法再用；如果拒绝新消息，用户问一句条款都得先取消方案 |
+| D50 | 方案确认或取消后清空需求槽位；转去聊别的（expired）时保留。卡片上每项可选「保留 / 换一款 / 不要这个险种」，全部险种都不要时等于取消 | 代码审查：槽位一直留在会话里，「给我老婆也配一份」会悄悄沿用上一个人的预算、险种和排除的产品；原来的「去掉」只排除产品，同险种会换成下一款，和字面意思不符 |
+| D49 | interrupt 单独放在 advisor_review 节点；落库、调用模型、推送卡片都在前一个节点 advisor_present 里完成 | 恢复执行时被中断的节点会从头重跑：放在同一个节点会重复落库、重复调用模型 |
 
 ---
 
@@ -139,7 +144,7 @@ insurance-agent/
 | `chunks` | id, document_id, product_id, parent_id, level(`parent`/`child`), section_path[], content, embedding vector(1024), tsv tsvector | 父子块同表，父块不存向量 |
 | `rate_books` | product_id, version, source_file, source_sha256, content(jsonb：全部费率表), is_current | 报价引擎的数据源（M5 起替代原计划的 `rate_plans`/`rate_items`，见 D41） |
 | `chat_threads` | id(=LangGraph thread_id), user_id, title, updated_at | 消息正文由 checkpointer 保存 |
-| `plans` | id, user_id, thread_id, status(`draft`/`confirmed`), items(jsonb), quote_snapshot(jsonb) | 方案确认结果 |
+| `plans` | id, user_id, thread_id（会话删除时置空）, status(`pending`/`confirmed`/`cancelled`/`superseded`/`expired`), slots(jsonb：生成时的需求), items(jsonb：每项的参数、报价明细、费率版本), summary(jsonb：预算、合计、没配上的险种及原因) | 方案确认结果（M6，D46） |
 | `quotes` | id, user_id, product_id, rate_book_id, params(jsonb), breakdown(jsonb), annual_premium, pay_years, total_premium, sum_assured | 报价可复现（引用具体费率版本） |
 | `eval_runs` | id, suite, config(jsonb), metrics(jsonb), created_at | 后台展示评测结果 |
 
@@ -223,6 +228,8 @@ START → load_context（取画像、上轮工作流）
 ### 6.2 各子图要点
 - **clause_qa**：定位产品（从对话中识别，或追问）→ 检索 → 生成回答，并强制带引用；检索不到时明确说"条款中未找到"。
 - **advisor**：维护一个"需求槽位"状态（被保人、年龄、预算、关注险种…），缺什么问什么；槽位齐了调用 `query_candidate_products` 和 `quote`，生成方案卡片 → `interrupt` 等用户确认、删减或调整 → 确认后写入 `plans`。
+  M6 实现（`app/agent/advisor.py` 纯函数 + `graph.py` 的四个节点）：`advisor_collect`（LLM 抽取槽位，代码校验；缺年龄/性别/社保/预算就一次问齐）→ `advisor_recommend`（代码按规则配方案，D47）→ `advisor_present`（写说明、落库 pending、推送 `plan_card`）→ `advisor_review`（interrupt；按钮或打字恢复，D48、D49）。
+  槽位只来自本次对话；M7 接入画像后预填。实测（qwen-plus，本机）：方案卡片在说出最后一个必填信息后约 6–9 秒出来，其中写说明约 4–6 秒；确认约 0.2–0.8 秒。
 - **claim_consult**：识别出险类型和被保人 → 从画像 `existing_coverage` 找出该被保人持有的库内产品（未登记则追问并给出登记建议）→ 只在这些产品的条款中检索保障责任、免责、等待期和理赔材料 → 输出结构化清单（是否可能赔付 + 依据条款 + 材料 + 流程），并声明"最终以保险公司审核为准"。
 - 路由时带上"上一轮所在工作流"，处理"那它等待期多久？"这类追问。
 
@@ -254,16 +261,18 @@ M5 实现（`app/pricing/`）：
 | GET/POST/PATCH/DELETE | `/api/v1/threads` | 会话 CRUD |
 | GET | `/api/v1/threads/{id}/messages` | 历史消息（从 checkpointer 读） |
 | POST | `/api/v1/chat` | SSE 流式对话（M4）：`{thread_id?, message}`，不带 thread_id 时新建会话；同一会话正在回答时 409 |
-| POST | `/api/v1/chat/resume` | 方案确认后恢复图执行（interrupt resume） |
+| POST | `/api/v1/chat/resume` | 方案卡片操作（M6）：`{thread_id, plan_id, action: confirm/cancel/edit, remove_product_ids（换一款）, remove_categories（不要这个险种）}`，SSE 同 `/chat`；plan_id 不是当前待确认的方案时 409。会话停在方案确认时，`/chat` 的普通消息也会作为恢复值（D48） |
 | GET | `/api/v1/products/{id}/pricing` | 报价所需参数及可选值（公开，M5）；不支持报价时 `supported=false` |
 | POST | `/api/v1/products/{id}/quote` | 试算（公开，不保存）：`{params}`；缺参、不可投保也返回 200，看 `status` |
 | POST/GET | `/api/v1/quotes` | 保存报价（服务端重新计算，不信任前端金额；算不出 422）/ 我的报价记录 |
 | GET/PUT | `/api/v1/profile` | 我的画像 |
-| GET | `/api/v1/plans` | 我的方案 |
+| GET | `/api/v1/plans` `/plans/{id}` | 我的方案（已确认和待确认） |
 | POST/GET | `/api/v1/admin/documents` | 上传条款、查看入库状态 |
 | GET | `/api/v1/admin/eval-runs` | 查看评测结果 |
 
 **SSE 事件类型**：`thread`（会话 id 与标题，第一个事件）、`token`（文本增量）、`citations`（引用列表）、`plan_card`（待确认方案，同时表示进入 interrupt）、`quote_card`、`profile_suggestion`（待用户确认的画像增量）、`status`（如"正在检索条款…"）、`done`、`error`。
+
+M6 实际的事件：`plan_card`（`{plan}`：方案卡片，含 plan_id；之后会话停在方案确认）、`plan_status`（`{plan_id, status}`：方案状态变化）。`quote_card` 没有单独实现：报价明细在方案卡片每一项里。
 
 **前端技术**：React 18 + antd + React Router + TanStack Query + Zustand；SSE 用 `fetch` + ReadableStream 解析（需要带 JWT 头，不用原生 EventSource）。
 
@@ -335,3 +344,5 @@ M5 实现（`app/pricing/`）：
 | Q16 | 评测集泄漏：改写提示词的示例取自难题集的错题，难题集 R@5 虚高到 0.971（#45），去掉后 0.912（#49） | 已处理：示例不再取自评测集（CLAUDE.md 约定）。教训：评测集只用于评估，看过的失败案例不能回流到提示词或规则里；需要调参时另留开发集 |
 | Q18 | M5 未覆盖或存疑：① 星相守2号转保版：费率表只分「有/无等待期」，条款写明无等待期只适用于意外和续保，没有任何信息区分个人版和转保版的价格，不猜，暂不支持报价；② 达尔文宝贝12号没有费率表；③ 附加险与按保额计价的可选责任未开放：众安「重疾关爱加油包」、星相守「重大疾病补充关爱」（都按每 5 万/每千元保额计价，费率表没给保额范围）、达尔文「附加投保人豁免」（按投保人年龄计费，要另一个人的信息）、医联有盟「附加长期医疗险」；④ 种子数据（来自原项目）与费率表不一致：参考保费区间（众安写 ¥255–1,420，费率表首投 142–11,926；小学童已改为 180，已有的库要执行 `python -m app.seed --overwrite`）、投保年龄（达尔文写 28天–35周岁，费率表有 0–55 岁的价格；星相守写 1–55 周岁，费率表「有等待期」列是 0–70 岁）。报价以费率表为准，但可能存在费率表里看不出的核保年龄限制 | 待办：③ 需要先找到保额规则；④ 参考保费可改为从费率表推出，投保年龄需要找产品投保须知核对 |
 | Q17 | 删除用户时 `chat_threads` 级联删除，但 LangGraph checkpoint 表里的消息不会跟着删（不在同一套外键里） | 目前没有删除用户的功能；做账号注销时要先逐个会话调用 `checkpointer.adelete_thread` 再删用户 |
+| Q19 | 顾问的推荐规则很简单：每个险种取保费最低的可投保产品（医疗险因此总是选星相守而不是众安），不比较保障责任；重疾按保额档位往下取，没考虑缩短交费期等其他调法 | 已知局限，作为 M8 端到端评测的观察点；改规则前先补评测题 |
+| Q20 | 方案确认依赖会话的中断状态：会话删除时待确认方案会标为 expired（已处理），但服务端异常导致中断丢失时，方案会停在 pending 却无法确认 | 概率低，暂不处理；「我的方案」页只展示，不提供确认按钮 |

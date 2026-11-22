@@ -6,6 +6,7 @@
 from app.models.chat import ChatThread
 from app.models.document import Chunk, ChunkLevel, Document, DocumentStatus
 from app.models.eval_run import EvalRun
+from app.models.plan import Plan, PlanStatus
 from app.models.pricing import Quote, RateBookRecord
 from app.models.product import Product, ProductCategory, ProductStatus
 from app.models.user import User, UserRole
@@ -17,6 +18,8 @@ __all__ = [
     "Document",
     "DocumentStatus",
     "EvalRun",
+    "Plan",
+    "PlanStatus",
     "Product",
     "ProductCategory",
     "ProductStatus",

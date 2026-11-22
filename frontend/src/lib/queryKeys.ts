@@ -16,5 +16,6 @@ export const queryKeys = {
   adminEvalRuns: (suite: string) => [USER_SCOPE, 'admin', 'eval-runs', suite] as const,
   threads: [USER_SCOPE, 'threads'] as const,
   quotes: [USER_SCOPE, 'quotes'] as const,
+  plans: [USER_SCOPE, 'plans'] as const,
   threadMessages: (id: string) => [USER_SCOPE, 'threads', id, 'messages'] as const,
 }

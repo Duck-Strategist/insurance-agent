@@ -173,7 +173,54 @@ export interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
   citations: Citation[]
+  /** 顾问生成的方案卡片（含当前状态） */
+  plan?: PlanCardData | null
 }
+
+// ---- 顾问方案（M6）----
+export type PlanStatus = 'pending' | 'confirmed' | 'cancelled' | 'superseded' | 'expired' | 'unknown'
+
+export interface PlanItem {
+  product_id: number
+  product_name: string
+  category: ProductCategory
+  category_label: string
+  params: QuoteParams
+  annual_premium: string
+  pay_years: number
+  total_premium: string
+  sum_assured: string | null
+  rate_version: string
+  lines: { title: string; premium: string; basis: string; page: number }[]
+}
+
+export interface PlanCardData {
+  plan_id: number
+  slots: Record<string, unknown>
+  items: PlanItem[]
+  dropped: { category: ProductCategory; category_label: string; reason: string }[]
+  budget: string
+  total_annual_premium: string
+  /** 历史消息里由服务端填写；流式过程中的新卡片视为 pending */
+  status?: PlanStatus
+}
+
+export interface SavedPlan {
+  id: number
+  thread_id: string | null
+  status: PlanStatus
+  slots: Record<string, unknown>
+  items: PlanItem[]
+  summary: { budget: string; total_annual_premium: string; dropped: PlanCardData['dropped'] }
+  created_at: string
+  updated_at: string
+}
+
+export type PlanAction =
+  | { action: 'confirm' }
+  | { action: 'cancel' }
+  /** 换一款：排除这些产品（同险种换成下一款）；remove_categories：这些险种不要了 */
+  | { action: 'edit'; remove_product_ids: number[]; remove_categories: ProductCategory[] }
 
 /** 对话接口的 SSE 事件 */
 export type ChatEvent =
@@ -181,6 +228,8 @@ export type ChatEvent =
   | { type: 'status'; text: string }
   | { type: 'token'; text: string }
   | { type: 'citations'; items: Citation[] }
+  | { type: 'plan_card'; plan: PlanCardData }
+  | { type: 'plan_status'; plan_id: number; status: PlanStatus }
   | { type: 'done' }
   | { type: 'error'; message: string }
 

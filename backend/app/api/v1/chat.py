@@ -8,8 +8,23 @@ from fastapi.responses import StreamingResponse
 
 from app.api.deps import AgentDep, CurrentUser, SessionDep
 from app.models import ChatThread
-from app.schemas.chat import ChatMessageOut, ChatRequest, ThreadCreate, ThreadOut, ThreadRename
-from app.services.chat_service import ThreadService, load_messages, sse, stream_answer
+from app.schemas.chat import (
+    ChatMessageOut,
+    ChatRequest,
+    ResumeRequest,
+    ThreadCreate,
+    ThreadOut,
+    ThreadRename,
+)
+from app.services.chat_service import (
+    ThreadService,
+    load_messages,
+    pending_plan_id,
+    sse,
+    stream_answer,
+    stream_resume,
+)
+from app.services.plan_service import PlanService
 
 router = APIRouter(tags=["chat"])
 
@@ -63,6 +78,8 @@ async def delete_thread(
     thread = await _own_thread(service, user.id, thread_id)
     if thread.id in _busy(request):
         raise HTTPException(status.HTTP_409_CONFLICT, detail="该会话正在回答，请稍后再删")
+    # 待确认的方案靠这个会话的中断来确认；会话删了就再也确认不了，标为过期
+    await PlanService(session).expire_pending_for_thread(user.id, thread.id)
     # 先删消息（checkpoint）再删会话行：反过来的话中途失败会留下找不到归属的消息
     await agent.checkpointer.adelete_thread(thread.id)
     await service.delete(thread)
@@ -73,7 +90,12 @@ async def list_messages(
     thread_id: ThreadId, user: CurrentUser, session: SessionDep, agent: AgentDep
 ) -> list[ChatMessageOut]:
     thread = await _own_thread(ThreadService(session), user.id, thread_id)
-    return await load_messages(agent, thread.id)
+    plans = PlanService(session)
+
+    async def statuses(ids: list[int]) -> dict[int, str]:
+        return await plans.statuses(user.id, ids)
+
+    return await load_messages(agent, thread.id, statuses)
 
 
 @router.post(
@@ -104,7 +126,7 @@ async def chat(
         try:
             # 第一个事件告诉前端会话 id（新建会话时前端据此跳转）
             yield sse("thread", {"id": thread.id, "title": title})
-            async for event in stream_answer(agent, thread.id, body.message):
+            async for event in stream_answer(agent, thread.id, body.message, user.id):
                 yield event
         finally:
             # 客户端断开时生成器被关闭，同样会走到这里
@@ -114,5 +136,47 @@ async def chat(
         events(),
         media_type="text/event-stream",
         # 关闭代理缓冲（nginx），否则 token 会攒一批才到前端
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post(
+    "/chat/resume",
+    summary="方案卡片操作：确认 / 取消 / 去掉某几项（SSE）",
+    response_description="text/event-stream：与 /chat 相同的事件",
+)
+async def resume(
+    body: ResumeRequest, user: CurrentUser, session: SessionDep, agent: AgentDep, request: Request
+) -> StreamingResponse:
+    service = ThreadService(session)
+    thread = await _own_thread(service, user.id, body.thread_id)
+    busy = _busy(request)
+    if thread.id in busy:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="上一条消息还在回答中，请稍候")
+    # 先占住会话再 await：否则连点两下时两个请求都能通过检查，同时恢复同一个中断
+    busy.add(thread.id)
+    try:
+        # 只能操作会话当前待确认的方案：旧卡片（已被调整取代、已确认）上的按钮一律拒绝
+        if await pending_plan_id(agent, thread.id) != body.plan_id:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail="这个方案已经更新或处理过了，请在最新的方案上操作",
+            )
+        await service.touch(thread)
+    except BaseException:
+        busy.discard(thread.id)
+        raise
+    decision = body.model_dump(include={"action", "remove_product_ids", "remove_categories"})
+
+    async def events() -> AsyncIterator[str]:
+        try:
+            async for event in stream_resume(agent, thread.id, user.id, decision):
+                yield event
+        finally:
+            busy.discard(thread.id)
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

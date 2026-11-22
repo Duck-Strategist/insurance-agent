@@ -13,6 +13,7 @@ import anyio
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.advisor import Candidate
 from app.core.logging import get_logger
 from app.models import Product, ProductStatus, Quote, RateBookRecord, User
 from app.pricing.engine import ParamSpec, QuoteResult, jsonable_params, rule_for
@@ -214,3 +215,28 @@ class PricingService:
             .limit(limit)
         )
         return [(q, name, version) for q, name, version in rows.all()]
+
+
+async def load_candidates(session: AsyncSession) -> list[Candidate]:
+    """顾问配方案用的候选产品：上架、有报价规则、费率表已入库的产品。"""
+    service = PricingService(session)
+    products = await session.scalars(
+        select(Product).where(Product.status == ProductStatus.ACTIVE).order_by(Product.id)
+    )
+    out: list[Candidate] = []
+    for product in products.all():
+        rule = rule_for(product.name)
+        loaded = await service.current_book(product) if rule is not None else None
+        if rule is None or loaded is None:
+            continue
+        out.append(
+            Candidate(
+                product_id=product.id,
+                name=product.name,
+                category=product.category,
+                rule=rule,
+                book=loaded[1],
+                min_premium=product.min_premium,
+            )
+        )
+    return out

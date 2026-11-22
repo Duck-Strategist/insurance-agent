@@ -21,11 +21,13 @@ import { useNavigate, useParams } from 'react-router'
 import { ChatMessageView } from '../components/ChatMessageView'
 import { chatApi } from '../lib/api'
 import { visibleHistory } from '../lib/answer'
+import { planActionLabel } from '../lib/quote'
 import { queryKeys } from '../lib/queryKeys'
-import type { ChatThread } from '../lib/types'
+import type { ChatEvent, ChatThread, PlanAction, PlanCardData } from '../lib/types'
 import { useChatStream } from '../stores/chat'
 
 const SUGGESTIONS = [
+  '我 30 岁，有社保，预算每年 5000，帮我配一份保险',
   '众安尊享e生百万医疗险的等待期多久？',
   '达尔文12号得了重疾以后还要交保费吗？',
   '小蜜蜂6号意外险，猝死能赔吗？',
@@ -164,21 +166,19 @@ export function ChatPage() {
     [],
   )
 
-  async function send(text: string) {
-    const question = text.trim()
-    if (!question || stream.streaming) return
-    setInput('')
+  /** 跑一轮流式回答：发消息和点方案卡片按钮共用（question 是显示在右侧的那句话） */
+  async function run(
+    question: string,
+    open: (signal: AbortSignal) => AsyncGenerator<ChatEvent>,
+  ) {
     const controller = new AbortController()
     abortRef.current = controller
-    const { start, setThread, appendAnswer, setStatus, setCitations, fail, finish, reset } =
+    const { start, setThread, appendAnswer, setStatus, setCitations, setPlan, fail, finish, reset } =
       useChatStream.getState()
     start(threadId ?? null, question)
     let current = threadId
     try {
-      for await (const ev of chatApi.stream(
-        { thread_id: threadId, message: question },
-        controller.signal,
-      )) {
+      for await (const ev of open(controller.signal)) {
         if (ev.type === 'thread') {
           current = ev.id
           setThread(ev.id)
@@ -187,6 +187,8 @@ export function ChatPage() {
         } else if (ev.type === 'status') setStatus(ev.text)
         else if (ev.type === 'token') appendAnswer(ev.text)
         else if (ev.type === 'citations') setCitations(ev.items)
+        else if (ev.type === 'plan_card') setPlan(ev.plan)
+        else if (ev.type === 'plan_status') void qc.invalidateQueries({ queryKey: queryKeys.plans })
         else if (ev.type === 'error') {
           fail(ev.message)
           return
@@ -197,6 +199,7 @@ export function ChatPage() {
       if (current) await qc.invalidateQueries({ queryKey: queryKeys.threadMessages(current) })
       reset()
       void qc.invalidateQueries({ queryKey: queryKeys.threads })
+      void qc.invalidateQueries({ queryKey: queryKeys.plans })
     } catch (e) {
       if (controller.signal.aborted) {
         reset()
@@ -205,6 +208,23 @@ export function ChatPage() {
         fail(e instanceof Error ? e.message : '发送失败')
       }
     }
+  }
+
+  async function send(text: string) {
+    const question = text.trim()
+    if (!question || stream.streaming) return
+    setInput('')
+    await run(question, (signal) =>
+      chatApi.stream({ thread_id: threadId, message: question }, signal),
+    )
+  }
+
+  async function planAction(plan: PlanCardData, action: PlanAction) {
+    if (!threadId || stream.streaming) return
+    const label = planActionLabel(plan, action)
+    await run(label, (signal) =>
+      chatApi.resume({ thread_id: threadId, plan_id: plan.plan_id, ...action }, signal),
+    )
   }
 
   const history = visibleHistory(threadId ? (messages.data ?? []) : [], showStream, stream.question)
@@ -221,7 +241,7 @@ export function ChatPage() {
             <Skeleton active />
           ) : empty ? (
             <Flex vertical align="center" justify="center" gap={16} style={{ flex: 1 }}>
-              <Empty description="问问产品条款吧，回答会标注出处" />
+              <Empty description="可以问产品条款（回答标注出处），也可以让我按预算配置保障方案" />
               <Space wrap style={{ justifyContent: 'center' }}>
                 {SUGGESTIONS.map((s) => (
                   <Button key={s} onClick={() => void send(s)}>
@@ -237,6 +257,9 @@ export function ChatPage() {
                 role={m.role}
                 content={m.content}
                 citations={m.citations}
+                plan={m.plan}
+                planBusy={stream.streaming}
+                onPlanAction={(plan, action) => void planAction(plan, action)}
               />
             ))
           )}
@@ -250,6 +273,8 @@ export function ChatPage() {
                   role="assistant"
                   content={stream.answer}
                   citations={stream.citations}
+                  plan={stream.plan}
+                  planBusy
                   status={stream.status ?? (stream.answer ? null : '思考中…')}
                 />
               )}

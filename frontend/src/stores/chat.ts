@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 
-import type { Citation } from '../lib/types'
+import type { Citation, PlanCardData } from '../lib/types'
 
 /**
  * 正在进行中的一轮对话（流式状态，spec D22：客户端状态放 Zustand）。
@@ -13,12 +13,15 @@ interface ChatStreamState {
   answer: string
   status: string | null
   citations: Citation[]
+  /** 本轮生成的方案卡片 */
+  plan: PlanCardData | null
   error: string | null
   start: (threadId: string | null, question: string) => void
   setThread: (threadId: string) => void
   appendAnswer: (text: string) => void
   setStatus: (text: string) => void
   setCitations: (items: Citation[]) => void
+  setPlan: (plan: PlanCardData) => void
   fail: (message: string) => void
   finish: () => void
   reset: () => void
@@ -31,6 +34,7 @@ const idle = {
   answer: '',
   status: null,
   citations: [],
+  plan: null,
   error: null,
 }
 
@@ -41,6 +45,7 @@ export const useChatStream = create<ChatStreamState>()((set) => ({
   appendAnswer: (text) => set((s) => ({ answer: s.answer + text, status: null })),
   setStatus: (text) => set({ status: text }),
   setCitations: (items) => set({ citations: items }),
+  setPlan: (plan) => set({ plan: { ...plan, status: 'pending' } }),
   fail: (message) => set({ streaming: false, status: null, error: message }),
   finish: () => set({ streaming: false, status: null }),
   reset: () => set(idle),

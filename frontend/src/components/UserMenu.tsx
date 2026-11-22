@@ -1,4 +1,9 @@
-import { CalculatorOutlined, LogoutOutlined, UserOutlined } from '@ant-design/icons'
+import {
+  CalculatorOutlined,
+  FileProtectOutlined,
+  LogoutOutlined,
+  UserOutlined,
+} from '@ant-design/icons'
 import { useQuery } from '@tanstack/react-query'
 import { Button, Dropdown } from 'antd'
 import { useLocation, useNavigate } from 'react-router'
@@ -45,10 +50,12 @@ export function UserMenu() {
     <Dropdown
       menu={{
         items: [
+          { key: 'plans', icon: <FileProtectOutlined />, label: '我的方案' },
           { key: 'quotes', icon: <CalculatorOutlined />, label: '我的报价' },
           { key: 'logout', icon: <LogoutOutlined />, label: '退出登录' },
         ],
         onClick: ({ key }) => {
+          if (key === 'plans') navigate('/plans')
           if (key === 'quotes') navigate('/quotes')
           if (key === 'logout') {
             // 个人数据缓存由 Providers 在登录态变化时统一清理
