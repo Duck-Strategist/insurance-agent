@@ -21,6 +21,7 @@ uv run python -m app.eval agreement eval/reports/e2e-<run>-human.csv [--run N] [
 import argparse
 import asyncio
 import functools
+import hashlib
 import statistics
 import sys
 import time
@@ -35,9 +36,9 @@ from langchain_core.runnables import RunnableConfig
 
 from app.agent.graph import answer_from_clauses, load_catalog, rewrite_query
 from app.agent.llm import make_llms, parse_json_object
-from app.agent.prompts import NOT_FOUND
+from app.agent.prompts import NOT_FOUND, ROUTER
 from app.core.config import RagSettings, Settings, get_settings
-from app.core.logging import configure_logging
+from app.core.logging import configure_logging, get_logger
 from app.eval import dataset as ds
 from app.eval import e2e, routing
 from app.eval.generate import (
@@ -62,7 +63,10 @@ from app.infra.db import Database
 from app.infra.tracing import flush_traces, init_tracing, trace_config
 from app.models import EvalRun
 from app.rag.factory import RagNotConfiguredError, check_configured, retriever
-from app.rag.retriever import SearchMode
+from app.rag.reranker import RerankError
+from app.rag.retriever import Hit, SearchMode
+
+logger = get_logger(__name__)
 
 DATASET_NAMES = ["retrieval_generated.jsonl", "retrieval_hard.jsonl"]
 ROUTING_TEST = "routing_test.jsonl"
@@ -263,6 +267,10 @@ def eval_trace_config(settings: Settings, suite: str, dataset: str) -> RunnableC
     return trace_config(f"eval-{suite}", tags=["eval", suite, dataset])
 
 
+def prompt_fingerprint(prompt: str) -> str:
+    return hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12]
+
+
 async def cmd_routing(datasets: list[Path], reports_dir: Path | None) -> int:
     settings = get_settings()
     if not datasets:
@@ -297,7 +305,12 @@ async def cmd_routing(datasets: list[Path], reports_dir: Path | None) -> int:
                 db.session_factory,
                 dataset=path.name,
                 dataset_hash=digest,
-                config={"model": settings.llm.model, "history_turns": settings.llm.history_turns},
+                config={
+                    "model": settings.llm.model,
+                    "history_turns": settings.llm.history_turns,
+                    # 提示词改过之后，同样的模型配置也不能直接比
+                    "router_prompt_sha": prompt_fingerprint(ROUTER),
+                },
                 results=results,
             )
             print(
@@ -394,9 +407,11 @@ async def report_e2e(
     metrics: dict[str, Any],
     results: list[e2e.E2EResult],
     references: dict[str, str],
+    config: dict[str, Any],
     exclude: frozenset[str] = frozenset(),
-    blind: bool = False,
+    blind: bool = True,
 ) -> None:
+    """blind 默认开：人工抽检时看不到裁判结论（D61），算一致率时从这次运行的逐题结果里取。"""
     reports: Path = (
         reports_dir
         if reports_dir is not None
@@ -413,7 +428,10 @@ async def report_e2e(
         references,
     )
     report = await write_report(
-        rag, reports, "e2e", "\n".join(render_e2e(dataset, run_id, metrics, results)) + "\n"
+        rag,
+        reports,
+        "e2e",
+        "\n".join(render_e2e(dataset, run_id, metrics, results, config)) + "\n",
     )
     a, u = metrics["answerable"], metrics["unanswerable"]
     print(
@@ -493,19 +511,16 @@ async def cmd_e2e(
 
             print(f"{path.name}：{len(items)} 题，回答 {settings.llm.model}，裁判 {judge_model}")
             results = list(await asyncio.gather(*(one(i) for i in items)))
+        run_config: dict[str, Any] = {
+            "answer_model": settings.llm.model,
+            "judge_model": judge_model,
+            "judge_version": e2e.JUDGE_VERSION,
+            "mode": "hybrid_rerank",
+            "rerank_model": rag.rerank_model,
+            "context_chars_per_section": settings.llm.context_chars_per_section,
+        }
         run_id, metrics = await save_e2e(
-            db,
-            dataset=path.name,
-            digest=digest,
-            config={
-                "answer_model": settings.llm.model,
-                "judge_model": judge_model,
-                "judge_version": e2e.JUDGE_VERSION,
-                "mode": "hybrid_rerank",
-                "rerank_model": rag.rerank_model,
-                "context_chars_per_section": settings.llm.context_chars_per_section,
-            },
-            results=results,
+            db, dataset=path.name, digest=digest, config=run_config, results=results
         )
     finally:
         await db.dispose()
@@ -518,6 +533,7 @@ async def cmd_e2e(
         metrics=metrics,
         results=results,
         references=references,
+        config=run_config,
     )
     return 0
 
@@ -561,43 +577,51 @@ async def cmd_rejudge(
         doc_ids, sections, references = ctx
         trace = eval_trace_config(settings, "e2e-rejudge", path.name)
         sem = asyncio.Semaphore(concurrency)
-        counts = {"rebuilt": 0, "mismatch": 0}
         async with retriever(rag, db.session_factory) as r:
+
+            async def search_hits(item: e2e.E2EItem) -> tuple[list[Hit], bool]:
+                """与 answer_from_clauses 一样：重排失败退化为混合检索。返回 (结果, 是否退化)。"""
+                doc = [doc_ids[item.file_name]]
+                try:
+                    found = await r.search(
+                        item.question, mode=SearchMode.HYBRID_RERANK, document_ids=doc
+                    )
+                    return found.hits, False
+                except RerankError as exc:
+                    logger.warning("eval.rerank_failed", item=item.id, error=str(exc))
+                    found = await r.search(item.question, mode=SearchMode.HYBRID, document_ids=doc)
+                    return found.hits, True
 
             async def passages_of(
                 detail: dict[str, Any], item: e2e.E2EItem
-            ) -> dict[int, tuple[list[str], str]]:
+            ) -> tuple[dict[int, tuple[list[str], str]], dict[str, Any]]:
+                """返回 (段落, 这道题的还原情况)；还原情况记在逐题结果里，重试不会重复计数。"""
                 if detail.get("context"):
-                    return {
+                    stored = {
                         c["index"]: (
                             c["path"],
                             sections.get((item.file_name, tuple(c["path"])), ""),
                         )
                         for c in detail["context"]
                     }
+                    return stored, {}
                 if detail.get("no_hits"):
-                    return {}
-                counts["rebuilt"] += 1
-                hits = (
-                    await r.search(
-                        item.question,
-                        mode=SearchMode.HYBRID_RERANK,
-                        document_ids=[doc_ids[item.file_name]],
-                    )
-                ).hits
+                    return {}, {}
+                hits, degraded = await search_hits(item)
                 passages = {
                     i: (h.section_path, h.parent_content) for i, h in enumerate(hits, start=1)
                 }
+                mismatch = 0
                 for c in detail["cited_sections"]:
                     if passages.get(c["index"], ([], ""))[0] != c["path"]:
-                        counts["mismatch"] += 1
+                        mismatch += 1
                         key = (item.file_name, tuple(c["path"]))
                         passages[c["index"]] = (c["path"], sections.get(key, ""))
-                return passages
+                return passages, {"rebuilt": True, "mismatch": mismatch, "degraded": degraded}
 
             async def attempt(detail: dict[str, Any]) -> e2e.E2EResult:
                 item = items[detail["id"]]
-                passages = await passages_of(detail, item)
+                passages, rebuild = await passages_of(detail, item)
                 cited = [int(c["index"]) for c in detail["cited_sections"]]
                 citations = [
                     {
@@ -624,7 +648,10 @@ async def cmd_rejudge(
                     judgement,
                     float(detail["latency_ms"]),
                     bool(detail.get("no_hits")),
-                    extra={"context": [{"index": i, "path": p} for i, (p, _) in passages.items()]},
+                    extra={
+                        "context": [{"index": i, "path": p} for i, (p, _) in passages.items()],
+                        "rebuild": rebuild,
+                    },
                 )
 
             async def one(detail: dict[str, Any]) -> e2e.E2EResult:
@@ -636,24 +663,31 @@ async def cmd_rejudge(
                 f"裁判 {judge_model}（{e2e.JUDGE_VERSION}）"
             )
             results = list(await asyncio.gather(*(one(d) for d in source.details)))
+        rebuilds = [x.extra["rebuild"] for x in results if x.extra.get("rebuild")]
+        counts = {
+            "rebuilt": len(rebuilds),
+            "mismatch": sum(b["mismatch"] for b in rebuilds),
+            "degraded": sum(b["degraded"] for b in rebuilds),
+        }
+        run_config: dict[str, Any] = {
+            **source.config,
+            "judge_model": judge_model,
+            "judge_version": e2e.JUDGE_VERSION,
+            "source_run": source_id,
+            "context_rebuilt": counts["rebuilt"],
+            "context_mismatch": counts["mismatch"],
+            "context_rerank_degraded": counts["degraded"],
+        }
         run_id, metrics = await save_e2e(
-            db,
-            dataset=source.dataset,
-            digest=digest,
-            config={
-                **source.config,
-                "judge_model": judge_model,
-                "judge_version": e2e.JUDGE_VERSION,
-                "source_run": source_id,
-                "context_rebuilt": counts["rebuilt"],
-                "context_mismatch": counts["mismatch"],
-            },
-            results=results,
+            db, dataset=source.dataset, digest=digest, config=run_config, results=results
         )
     finally:
         await db.dispose()
         flush_traces()
-    print(f"还原上下文 {counts['rebuilt']} 题，被引用段落与重新检索对不上 {counts['mismatch']} 处")
+    print(
+        f"还原上下文 {counts['rebuilt']} 题（重排失败退化 {counts['degraded']} 题），"
+        f"被引用段落与重新检索对不上 {counts['mismatch']} 处"
+    )
     # 新的抽检样本：排除调裁判时看过的题，并且不带裁判结论（盲标）
     await report_e2e(
         rag,
@@ -663,8 +697,8 @@ async def cmd_rejudge(
         metrics=metrics,
         results=results,
         references=references,
+        config=run_config,
         exclude=exclude,
-        blind=True,
     )
     return 0
 
@@ -681,7 +715,11 @@ def e2e_load(path: Path) -> list[e2e.E2EItem]:
 
 
 def render_e2e(
-    name: str, run_id: int, m: dict[str, object], results: list[e2e.E2EResult]
+    name: str,
+    run_id: int,
+    m: dict[str, object],
+    results: list[e2e.E2EResult],
+    config: dict[str, Any],
 ) -> list[str]:
     a = m["answerable"]
     u = m["unanswerable"]
@@ -691,6 +729,13 @@ def render_e2e(
         f"# 端到端评测报告（{name}，eval_run #{run_id}）",
         "",
         f"- 时间：{datetime.now():%Y-%m-%d %H:%M}",
+        f"- 回答 {config.get('answer_model')}；裁判 {config.get('judge_model')}"
+        f"（{config.get('judge_version', 'v1')}）"
+        + (
+            f"；重判 #{config['source_run']} 的回答（回答不变，只换裁判）"
+            if config.get("source_run")
+            else ""
+        ),
         f"- 有答案 {a['n']} 题：正确性 **{a['correctness']}**（correct {a['correct_rate']}，"
         f"partial {a['partial_rate']}），误拒率 {a['false_refusal_rate']}，"
         f"回答了但没有引用 {a['uncited_rate']}",

@@ -147,6 +147,7 @@ _LITERAL_BREAK = re.compile(r"\\[nrt]")
 _HALF_TO_FULL = str.maketrans(",;:()!?", "，；：（）！？")
 _SENTENCE = re.compile(r"[。；;\n]|……|\.\.\.")
 MIN_FRAGMENT = 6
+MIN_SHORT_QUOTE = 2  # 短摘录至少 2 个字，且要带数字：「等于」「酒后」这类短词几乎总能在段落里找到
 
 
 def _norm(text: str) -> str:
@@ -155,8 +156,12 @@ def _norm(text: str) -> str:
 
 def quote_in_passage(quote: str, passage: str) -> bool:
     """摘录按句切开，每一句（至少 6 个字的）都要逐字出现在段落里。
-    允许裁判把同一段里不相邻的几句摘在一起；忽略空白、HTML 标签、上标、字面换行和全半角标点。"""
+    允许裁判把同一段里不相邻的几句摘在一起；忽略空白、HTML 标签、上标、字面换行和全半角标点。
+    整条摘录很短时（如「90天」「10元」）不切分：带数字的短摘录整条逐字出现就算，短的数字事实也是有效依据。"""
     body = _norm(passage)
+    whole = _norm(quote)
+    if len(whole) < MIN_FRAGMENT:
+        return len(whole) >= MIN_SHORT_QUOTE and any(ch.isdigit() for ch in whole) and whole in body
     pieces = _SENTENCE.split(_LITERAL_BREAK.sub("\n", quote))
     fragments = [f for f in (_norm(x) for x in pieces) if len(f) >= MIN_FRAGMENT]
     return bool(fragments) and all(f in body for f in fragments)

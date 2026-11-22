@@ -35,3 +35,23 @@ export function E2E_FAILURE(d: E2EDetail): boolean {
   const refusedWrongly = d.answerable ? d.judge.refused : !d.judge.refused
   return d.judge.correctness !== 'correct' || refusedWrongly || badCite
 }
+
+const HUMAN_LABELS: Record<string, string> = {
+  human: '抽检',
+  human_test: '测试集',
+  human_dev: '开发集',
+}
+
+/**
+ * 运行记录里和人工标注比过的结果：`agreement --key` 写入 metrics 的 human、human_test、human_dev 等。
+ * 开发集是调裁判时看过的标注，一致率偏高，排在最后并标明。
+ */
+export function humanAgreements(
+  metrics: Record<string, unknown>,
+): { key: string; label: string; data: Record<string, unknown> }[] {
+  const order = ['human', 'human_test', 'human_dev']
+  return Object.keys(metrics)
+    .filter((k) => k.startsWith('human') && typeof metrics[k] === 'object' && metrics[k] !== null)
+    .sort((a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99))
+    .map((k) => ({ key: k, label: HUMAN_LABELS[k] ?? k, data: metrics[k] as Record<string, unknown> }))
+}

@@ -13,7 +13,7 @@ import type { ReactNode } from 'react'
 import { useSearchParams } from 'react-router'
 
 import { adminApi } from '../lib/api'
-import { E2E_FAILURE, INTENT_LABELS, num, pct, type E2EDetail } from '../lib/evals'
+import { E2E_FAILURE, INTENT_LABELS, humanAgreements, num, pct, type E2EDetail } from '../lib/evals'
 import { queryKeys } from '../lib/queryKeys'
 import { SEARCH_MODE_LABELS, type EvalRun, type SearchMode } from '../lib/types'
 
@@ -93,17 +93,26 @@ const routingColumns: TableColumnsType<EvalRun> = [
   { title: 'P50（ms）', key: 'lat', width: 90, render: (_, r) => ms(sub(r.metrics, 'latency_ms').p50) },
 ]
 
+/** 一次运行可能和几批人工标注比过（human / human_dev / human_test），逐个列出并标明是哪一批 */
 function HumanAgreement({ m }: { m: Metrics }) {
-  const h = m.human as Metrics | undefined
-  if (!h) return <Tag>待人工标注</Tag>
+  const all = humanAgreements(m)
+  if (all.length === 0) return <Tag>待人工标注</Tag>
   return (
-    <Tooltip
-      title={`人工标注 ${String(h.n)}/${String(h.of)} 题；kappa ${num(h.correctness_kappa)}；拒答一致 ${pct(
-        h.refused_agreement,
-      )}；引用一致 ${pct(h.citations_agreement)}`}
-    >
-      {pct(h.correctness_agreement)}
-    </Tooltip>
+    <Flex vertical gap={2}>
+      {all.map(({ key, label, data: h }) => (
+        <Tooltip
+          key={key}
+          title={`${label}：人工标注 ${String(h.n)}/${String(h.of)} 题${h.labels ? `（${String(h.labels)}）` : ''}；kappa ${num(
+            h.correctness_kappa,
+          )}；拒答一致 ${pct(h.refused_agreement)}；引用一致 ${pct(h.citations_agreement)}`}
+        >
+          <span>
+            <Typography.Text type="secondary">{label} </Typography.Text>
+            {pct(h.correctness_agreement)}
+          </span>
+        </Tooltip>
+      ))}
+    </Flex>
   )
 }
 

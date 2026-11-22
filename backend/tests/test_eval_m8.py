@@ -361,3 +361,36 @@ async def test_with_retries(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(openai.AuthenticationError):
         await retry.with_retries(auth, label="q3")
     assert len(calls) == 1  # 认证错误不重试
+
+
+def test_short_quotes_need_exact_match() -> None:
+    """「90天」「10元」这类短的数字事实也是有效依据：整条逐字出现就算。"""
+    passage = "本合同的等待期为 90 天。工本费不超过 10 元。"
+    assert e2e.quote_in_passage("90天", passage)
+    assert e2e.quote_in_passage("10 元", passage)
+    assert not e2e.quote_in_passage("30天", passage)
+    assert not e2e.quote_in_passage("天", passage)  # 单个字几乎总能找到，不算
+    assert not e2e.quote_in_passage("等待期", passage)  # 不带数字的短词不算
+
+
+def test_e2e_report_header_names_judge_and_source_run() -> None:
+    from app.eval.__main__ import prompt_fingerprint, render_e2e
+
+    rs = [result("a01", True, "correct", False, {1: True})]
+    m = e2e.summarize(rs)
+    header = "\n".join(
+        render_e2e(
+            "e2e.jsonl",
+            9,
+            m,
+            rs,
+            {"answer_model": "qwen-plus", "judge_model": "qwen-max", "judge_version": "v3",
+             "source_run": 7},
+        )[:5]
+    )  # fmt: skip
+    assert "裁判 qwen-max（v3）" in header and "重判 #7 的回答" in header
+    old = "\n".join(render_e2e("e2e.jsonl", 7, m, rs, {"judge_model": "qwen-max"})[:5])
+    assert "（v1）" in old and "重判" not in old  # 没记版本的是 v1
+    # 提示词指纹：改一个字就不同，用来区分「同样的模型配置、不同的提示词」
+    assert prompt_fingerprint("abc") != prompt_fingerprint("abd")
+    assert len(prompt_fingerprint("abc")) == 12
