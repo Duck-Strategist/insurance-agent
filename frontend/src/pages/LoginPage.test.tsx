@@ -99,3 +99,27 @@ test('本地 token 已失效时，/me 返回 401 会自动退出登录', async (
   // 顶栏和首页各有一个登录入口
   expect(await screen.findAllByRole('button', { name: '登录 / 注册' })).toHaveLength(2)
 })
+
+test('本地 token 已失效时打开登录页，留在登录页而不是被弹回首页', async () => {
+  // token 一天过期：第二天直接打开 /login，旧逻辑看到本地有 token 就跳走，/me 返回 401 后用户停在首页
+  useAuthStore.setState({ token: 'expired', user: tokenResponse.user as never })
+  mockFetch({
+    '/health': healthOk,
+    '/api/v1/auth/me': () => jsonResponse({ detail: '登录已失效，请重新登录' }, 401),
+  })
+  const { router } = renderAt('/login')
+  expect(await screen.findByLabelText('用户名')).toBeInTheDocument()
+  expect(router.state.location.pathname).toBe('/login')
+  expect(useAuthStore.getState().token).toBeNull()
+})
+
+test('本地 token 仍有效时打开登录页，校验通过后跳回来源页', async () => {
+  useAuthStore.setState({ token: 'jwt-token', user: tokenResponse.user as never })
+  mockFetch({
+    '/health': healthOk,
+    '/api/v1/auth/me': () => jsonResponse(tokenResponse.user),
+    '/api/v1/products': () => jsonResponse({ items: [], total: 0, page: 1, page_size: 12 }),
+  })
+  const { router } = renderAt('/login')
+  await waitFor(() => expect(router.state.location.pathname).toBe('/'))
+})

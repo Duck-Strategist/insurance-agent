@@ -1,9 +1,10 @@
 import { useMutation } from '@tanstack/react-query'
-import { Alert, Button, Card, Flex, Form, Input, Tabs, Typography } from 'antd'
+import { Alert, Button, Card, Flex, Form, Input, Spin, Tabs, Typography } from 'antd'
 import { useState } from 'react'
 import { Navigate, useLocation, useNavigate } from 'react-router'
 
 import { authApi, type Credentials } from '../lib/api'
+import { useCurrentUser } from '../lib/currentUser'
 import { safeRedirect } from '../lib/navigation'
 import { useAuthStore } from '../stores/auth'
 
@@ -25,7 +26,17 @@ export function LoginPage() {
     },
   })
 
-  if (token) return <Navigate to={redirectTo} replace />
+  // 本地有 token 不等于已登录（一天过期，用户也可能已被删除）：先用 /me 校验，通过才跳走。
+  // 401 时 request() 清掉 token，这里就显示表单；网络错误等其他失败也显示表单，让用户重新登录
+  const me = useCurrentUser()
+  if (token && me.isSuccess && !mutation.isPending) return <Navigate to={redirectTo} replace />
+  if (token && !me.isError && !mutation.isPending) {
+    return (
+      <Flex justify="center" style={{ paddingTop: 96 }}>
+        <Spin />
+      </Flex>
+    )
+  }
 
   return (
     <Flex justify="center" style={{ paddingTop: 48 }}>
