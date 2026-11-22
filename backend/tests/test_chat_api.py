@@ -17,6 +17,7 @@ from app.api.v1 import chat as chat_module
 from app.core.config import Settings
 from app.main import create_app
 from app.models import Document, Product
+from tests.conftest import serial_sessionmaker
 from tests.test_agent import make_runtime, route
 from tests.test_auth import bearer, register
 
@@ -35,9 +36,7 @@ def box() -> Box:
 @pytest.fixture
 def factory(db_session: AsyncSession) -> async_sessionmaker[AsyncSession]:
     # 对话图里查产品目录用同一个连接，能看到测试事务里插入的数据
-    return async_sessionmaker(
-        bind=db_session.bind, join_transaction_mode="create_savepoint", expire_on_commit=False
-    )
+    return serial_sessionmaker(db_session.bind)  # type: ignore[arg-type]
 
 
 @pytest.fixture

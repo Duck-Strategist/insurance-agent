@@ -7,7 +7,7 @@ import { healthOk, jsonResponse, mockFetch, renderAt } from '../test/utils'
 
 afterEach(() => {
   vi.unstubAllGlobals()
-  useChatStream.getState().reset()
+  useChatStream.getState().clearAll()
 })
 
 const user = { id: 1, username: 'alice', role: 'user' as const }
@@ -220,4 +220,47 @@ test('非待确认的方案卡片没有操作按钮', async () => {
   renderAt('/chat/th-8')
   expect(await screen.findByText('已调整')).toBeInTheDocument()
   expect(screen.queryByRole('button', { name: '确认方案' })).not.toBeInTheDocument()
+})
+
+test('画像建议：一轮结束后仍显示，点保存才提交，提交的是服务端给的增量', async () => {
+  useAuthStore.setState({ token: 't', user })
+  const suggestion = {
+    items: [
+      { label: '年龄', value: '30 周岁（按年龄估算出生日期）' },
+      { label: '城市', value: '杭州' },
+    ],
+    patch: { birth_date: '1996-05-24', birth_date_estimated: true, city: '杭州' },
+  }
+  const fetchMock = mockFetch({
+    '/health': healthOk,
+    '/api/v1/auth/me': () => jsonResponse(user),
+    '/api/v1/threads/th-5/messages': () => jsonResponse([]),
+    '/api/v1/threads': () => jsonResponse([]),
+    '/api/v1/profile/suggestions': () => jsonResponse({ city: '杭州' }),
+    '/api/v1/chat': () =>
+      new Response(
+        sseBody([
+          ['thread', { id: 'th-5', title: '我 30 岁住杭州' }],
+          ['profile_suggestion', { suggestion }],
+          ['token', { text: '好的。' }],
+          ['done', {}],
+        ]),
+      ),
+  })
+  renderAt('/chat/th-5')
+  const box = await screen.findByPlaceholderText(/输入问题/)
+  fireEvent.change(box, { target: { value: '我 30 岁住杭州' } })
+  fireEvent.click(screen.getByRole('button', { name: /发送/ }))
+
+  expect(await screen.findByText('保存到画像？')).toBeInTheDocument()
+  // 一轮结束（流式内容清空）后建议还在
+  await waitFor(() => expect(useChatStream.getState().streaming).toBe(false))
+  expect(screen.getByText('30 周岁（按年龄估算出生日期）')).toBeInTheDocument()
+  expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/profile/suggestions'))).toBe(false)
+
+  fireEvent.click(screen.getByRole('button', { name: '保存到画像' }))
+  await waitFor(() => expect(screen.queryByText('保存到画像？')).not.toBeInTheDocument())
+  const call = fetchMock.mock.calls.find(([u]) => String(u).endsWith('/api/v1/profile/suggestions'))
+  expect(call?.[1]?.method).toBe('POST')
+  expect(JSON.parse(String(call?.[1]?.body))).toEqual(suggestion.patch)
 })

@@ -28,6 +28,7 @@ from app.models import Document, Product
 from app.rag.reranker import RerankError
 from app.rag.retriever import Hit, SearchMode, SearchResult
 from app.services.chat_service import make_title, sse, stream_answer
+from tests.conftest import serial_sessionmaker
 
 # ---- 纯函数 ----
 
@@ -110,6 +111,20 @@ class ScriptedLLM(GenericFakeChatModel):
         return await super().ainvoke(input, config, **kwargs)
 
 
+class ConstLLM(ScriptedLLM):
+    """每次都返回同一句（画像抽取默认什么都没抽到）。"""
+
+    reply: str = "{}"
+
+    def __init__(self, reply: str = "{}") -> None:
+        super().__init__([])
+        self.reply = reply
+
+    async def ainvoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:  # type: ignore[override]
+        self.prompts_seen.append(str(input[-1].content))
+        return AIMessage(self.reply)
+
+
 class FakeRetriever:
     def __init__(self, hits: list[Hit], rerank_fails: bool = False) -> None:
         self.hits = hits
@@ -136,9 +151,7 @@ class FakeRetriever:
 async def session_factory(engine: AsyncEngine) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     async with engine.connect() as conn:
         outer = await conn.begin()
-        yield async_sessionmaker(
-            bind=conn, join_transaction_mode="create_savepoint", expire_on_commit=False
-        )
+        yield serial_sessionmaker(conn)
         await outer.rollback()
 
 
@@ -172,11 +185,16 @@ def make_runtime(
     json_replies: Sequence[str],
     answer_replies: Sequence[str] = (),
     retriever: FakeRetriever | None = None,
+    profile_llm: ScriptedLLM | None = None,
 ) -> tuple[AgentRuntime, ScriptedLLM, ScriptedLLM, FakeRetriever]:
+    """profile_llm：画像抽取（与路由并行，单独一个假模型，不打乱 json_replies 的顺序）。"""
     json_llm, answer_llm = ScriptedLLM(json_replies), ScriptedLLM(answer_replies)
     retr = retriever or FakeRetriever([hit(1, "第三条 等待期"), hit(2, "第九条 责任免除")])
     saver = InMemorySaver()
-    graph = build_graph(AgentDeps(factory, retr, json_llm, answer_llm, LlmSettings()), saver)
+    deps = AgentDeps(
+        factory, retr, json_llm, answer_llm, LlmSettings(), profile_llm=profile_llm or ConstLLM()
+    )
+    graph = build_graph(deps, saver)
     return AgentRuntime(graph, saver), json_llm, answer_llm, retr
 
 
@@ -380,14 +398,10 @@ async def test_no_hits_and_unindexed_product_get_fixed_replies(
     assert "还没有入库" in text_of(await ask(rt, "对话测试未入库险等待期多久"))
 
 
-async def test_unimplemented_intents_get_coming_soon(
+async def test_out_of_scope_gets_fixed_reply(
     session_factory: async_sessionmaker[AsyncSession], products: dict[str, int]
 ) -> None:
-    rt, _, _, retr = make_runtime(
-        session_factory, json_replies=[route("claim", []), route("other", [])]
-    )
-    assert text_of(await ask(rt, "住院了怎么理赔")) == prompts.COMING_SOON["claim"]
-    assert (await state(rt))["last_workflow"] == "claim"
+    rt, _, _, retr = make_runtime(session_factory, json_replies=[route("other", [])])
     assert text_of(await ask(rt, "今天天气怎么样")) == prompts.OUT_OF_SCOPE
     assert retr.calls == []
 

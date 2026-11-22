@@ -19,6 +19,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router'
 
 import { ChatMessageView } from '../components/ChatMessageView'
+import { ProfileSuggestionCard } from '../components/ProfileSuggestionCard'
 import { chatApi } from '../lib/api'
 import { visibleHistory } from '../lib/answer'
 import { planActionLabel } from '../lib/quote'
@@ -31,6 +32,7 @@ const SUGGESTIONS = [
   '众安尊享e生百万医疗险的等待期多久？',
   '达尔文12号得了重疾以后还要交保费吗？',
   '小蜜蜂6号意外险，猝死能赔吗？',
+  '我住院了，帮我看看能不能赔',
 ]
 
 function ThreadList({ current }: { current?: string }) {
@@ -151,16 +153,19 @@ export function ChatPage() {
   const showStream =
     (stream.streaming || stream.error !== null || stream.answer !== '') &&
     stream.threadId === (threadId ?? null)
+  const suggestion = threadId ? stream.suggestions[threadId] : undefined
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView?.({ block: 'end' })
-  }, [messages.data, stream.answer, stream.status])
+  }, [messages.data, stream.answer, stream.status, suggestion])
 
   // 离开页面（含退出登录被跳到登录页）时停止生成并清空进行中的内容：
   // 后端会随连接关闭而取消；不清空的话下一个登录的用户会看到上一个人的提问
   useEffect(
     () => () => {
       abortRef.current?.abort()
+      // 画像建议保留：用户可能点卡片上的「我的画像」去看一眼再回来保存；
+      // 退出登录、换账号时由 Providers 统一清掉
       useChatStream.getState().reset()
     },
     [],
@@ -173,8 +178,18 @@ export function ChatPage() {
   ) {
     const controller = new AbortController()
     abortRef.current = controller
-    const { start, setThread, appendAnswer, setStatus, setCitations, setPlan, fail, finish, reset } =
-      useChatStream.getState()
+    const {
+      start,
+      setThread,
+      appendAnswer,
+      setStatus,
+      setCitations,
+      setPlan,
+      setSuggestion,
+      fail,
+      finish,
+      reset,
+    } = useChatStream.getState()
     start(threadId ?? null, question)
     let current = threadId
     try {
@@ -189,6 +204,7 @@ export function ChatPage() {
         else if (ev.type === 'citations') setCitations(ev.items)
         else if (ev.type === 'plan_card') setPlan(ev.plan)
         else if (ev.type === 'plan_status') void qc.invalidateQueries({ queryKey: queryKeys.plans })
+        else if (ev.type === 'profile_suggestion' && current) setSuggestion(current, ev.suggestion)
         else if (ev.type === 'error') {
           fail(ev.message)
           return
@@ -279,6 +295,12 @@ export function ChatPage() {
                 />
               )}
             </>
+          )}
+          {suggestion && threadId && (
+            <ProfileSuggestionCard
+              suggestion={suggestion}
+              onDone={() => useChatStream.getState().dismissSuggestion(threadId)}
+            />
           )}
           <div ref={bottomRef} />
         </Flex>

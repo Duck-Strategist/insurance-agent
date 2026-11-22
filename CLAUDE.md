@@ -85,14 +85,17 @@ npm run lint ; npx tsc -b ; npm run test ; npm run build
 - LLM 只做「理解与表达」：意图、改写查询、组织回答。产品 id 必须在候选目录里（代码校验）、查哪份条款由代码根据产品决定、检索参数不暴露给 LLM（spec §6.3）。
 - 路由、改写用 JSON 模式 + `parse_json_object` 自己解析，不用函数调用（各家兼容接口支持不一致，测试里假模型也能直接返回 JSON）；解析失败要有兜底，不能让整轮失败。
 - 回答的引用由代码从正文 `[n]` 解析，只保留本轮检索到的编号；前端也只把有效编号渲染成可点击标记。
-- 流式输出：回答 token 只转发 `answer` 节点里的 `AIMessageChunk`（节点返回的完整 AIMessage 也会出现在 messages 流里）；状态、引用、固定话术走 `get_stream_writer()`。
+- 流式输出：回答 token 只转发 `chat_service.ANSWER_NODES`（`answer`、`claim_answer`）里的 `AIMessageChunk`（节点返回的完整 AIMessage 也会出现在 messages 流里）；状态、引用、固定话术走 `get_stream_writer()`。
 - 改了提示词要在真实模型上跑对话验证；影响检索的改动（改写提示词）要跑 `python -m app.eval retrieval --rewrite --keep-original`。
 - **提示词里的示例不能取自评测集**（包括看过的失败案例）：曾把难题集错题的口语→术语映射写进改写提示词，难题集 R@5 虚高到 0.971，去掉后只有 0.912，比不改写还差（spec Q16）。
-- 测试用 `tests/test_agent.py` 的 `make_runtime`（脚本化假 LLM + 假检索器 + InMemorySaver）。
+- 测试用 `tests/test_agent.py` 的 `make_runtime`（脚本化假 LLM + 假检索器 + InMemorySaver）；画像抽取用单独的 `profile_llm`（默认什么都没抽到），不打乱 json_replies 的顺序。测试里的会话工厂用 `conftest.serial_sessionmaker`：所有会话共用一个连接，图的并行分支要排队。
 - 顾问（M6）：选险种、产品、保额是 `app/agent/advisor.py` 的规则，LLM 只抽槽位和写说明（D47）；说明里出现金额或「投保」会被换成模板（`graph.AMOUNT` / `MISLEADING`）。
 - interrupt 只放在 `advisor_review` 节点（恢复时被中断的节点会从头重跑，D49）；有副作用的操作（落库、调模型、推卡片）放在它之前的节点。
 - 会话停在方案确认时，`/chat` 的消息会作为恢复值交给 `advisor_review`（D48）；方案状态只能从 pending 改出（`PlanService.transition`）。
 - 删除会话、用户时要处理它们的 checkpoint 和待确认方案（Q17、D46）。
+- 画像（M7）：对话里只推送建议（`profile_suggestion`），用户点保存才写库（D20）；抽取与路由并行，失败不能影响回答。预填前先确定被保险人，换人时年龄、性别、社保全部作废（D53）。
+- 日期、天数这类计算由代码算好写进提示词（今天的日期、保单已生效天数），不让模型推算（D54）。
+- 理赔只查本轮提到的产品或画像里被保险人名下的保单；路由沿用的上一轮产品在换了被保险人时作废（D54）。
 - checkpointer 的表由 `AsyncPostgresSaver.setup()` 管理，`migrations/env.py` 的 `include_name` 把它们排除在 Alembic 之外。
 
 ## 报价约定

@@ -22,7 +22,9 @@ logger = get_logger(__name__)
 
 TITLE_CHARS = 30
 # 节点通过 get_stream_writer 发出、原样转发给前端的事件
-CUSTOM_EVENTS = {"status", "token", "citations", "plan_card", "plan_status"}
+CUSTOM_EVENTS = {"status", "token", "citations", "plan_card", "plan_status", "profile_suggestion"}
+# 模型回答逐 token 转发的节点；其余节点里的模型调用（路由、改写、抽取的 JSON）不外发
+ANSWER_NODES = {"answer", "claim_answer"}
 
 PlanStatusLookup = Callable[[list[int]], Awaitable[dict[int, str]]]
 
@@ -176,7 +178,7 @@ async def _stream(
                 # 节点返回的完整 AIMessage 也会出现在 messages 流里，不能再发一遍
                 if (
                     isinstance(chunk, AIMessageChunk)
-                    and meta.get("langgraph_node") == "answer"
+                    and meta.get("langgraph_node") in ANSWER_NODES
                     and chunk.content
                 ):
                     yield sse("token", {"text": str(chunk.content)})

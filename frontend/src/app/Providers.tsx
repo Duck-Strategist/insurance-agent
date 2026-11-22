@@ -5,6 +5,7 @@ import { type ReactNode, useEffect, useState } from 'react'
 
 import { USER_SCOPE } from '../lib/queryKeys'
 import { useAuthStore } from '../stores/auth'
+import { useChatStream } from '../stores/chat'
 
 export function Providers({ children }: { children: ReactNode }) {
   // 每个 Providers 实例一个 QueryClient，测试之间互不影响
@@ -18,6 +19,8 @@ export function Providers({ children }: { children: ReactNode }) {
       useAuthStore.subscribe((state, prev) => {
         if (state.user?.id !== prev.user?.id || (prev.token && !state.token)) {
           queryClient.removeQueries({ queryKey: [USER_SCOPE] })
+          // 对话里待确认的画像建议也属于上一个用户
+          useChatStream.getState().clearAll()
         }
       }),
     [queryClient],

@@ -230,8 +230,68 @@ export type ChatEvent =
   | { type: 'citations'; items: Citation[] }
   | { type: 'plan_card'; plan: PlanCardData }
   | { type: 'plan_status'; plan_id: number; status: PlanStatus }
+  | { type: 'profile_suggestion'; suggestion: ProfileSuggestion }
   | { type: 'done' }
   | { type: 'error'; message: string }
+
+// ---- 画像（M7）----
+export type Relation = 'spouse' | 'child' | 'parent'
+export type Gender = 'male' | 'female'
+
+export const RELATION_LABELS: Record<Relation, string> = {
+  spouse: '配偶',
+  child: '子女',
+  parent: '父母',
+}
+
+export interface FamilyMember {
+  id: string
+  relation: Relation
+  /** 称呼，如「大女儿」 */
+  name: string
+  birth_date: string | null
+  /** 出生日期是由对话里的年龄估算的 */
+  birth_date_estimated: boolean
+  gender: Gender | null
+  social_security: boolean | null
+}
+
+export interface Coverage {
+  /** self 或家庭成员 id */
+  insured: string
+  /** 为空表示库外产品 */
+  product_id: number | null
+  product_name: string
+  category: ProductCategory | null
+  sum_assured: string | null
+  start_date: string | null
+}
+
+export interface ProfileData {
+  birth_date: string | null
+  gender: Gender | null
+  social_security: boolean | null
+  occupation_class: number | null
+  city: string | null
+  annual_budget: string | null
+  family: FamilyMember[]
+  existing_coverage: Coverage[]
+}
+
+export type FieldSource = 'manual' | 'chat' | 'chat_age'
+
+export interface Profile extends ProfileData {
+  age: number | null
+  field_sources: Partial<Record<keyof ProfileData, FieldSource>>
+  /** 为空表示还没有画像 */
+  updated_at: string | null
+}
+
+/** 对话里抽取出的画像增量：用户点保存后原样提交 patch */
+export interface ProfileSuggestion {
+  items: { label: string; value: string }[]
+  patch: Record<string, unknown>
+}
 
 // ---- 报价（M5）----
 export type ParamKind = 'age' | 'choice' | 'bool' | 'money' | 'multi'

@@ -53,6 +53,10 @@ class Slots(TypedDict, total=False):
     ci_sum_assured: int  # 期望的重疾保额（元）
     life_annual_premium: str  # 寿险年交保费（元）
     excluded_product_ids: list[int]
+    # 为谁配置（M7）：self / spouse / child / parent，没说时按本人
+    insured: str
+    # 从画像带入的槽位名：回复里告诉用户，用户改口时从这里去掉
+    from_profile: list[str]
 
 
 # ---------- 槽位 ----------
@@ -82,10 +86,30 @@ def _money(value: Any) -> Decimal | None:
     return amount.quantize(Decimal("0.01"))
 
 
+# other：家人以外的人（朋友、同事），画像里没有，不预填
+INSURED_LABELS = {
+    "self": "本人",
+    "spouse": "配偶",
+    "child": "子女",
+    "parent": "父母",
+    "other": "他人",
+}
+# 描述被保险人的槽位：换了被保险人时都作废（不管是用户说的还是画像带入的）
+PERSON_SLOTS = ("age", "gender", "social_security")
+
+
 def merge_slots(current: Slots, raw: Mapping[str, Any]) -> Slots:
     """把 LLM 抽取出的槽位合并进当前槽位。每个字段单独校验，不合法的丢弃（保留原值），
     这样模型编出一个 200 岁或负数预算时，最多是多问一句，不会算出错误的方案。"""
     slots: Slots = Slots(**current)
+    insured = raw.get("insured")
+    if insured in INSURED_LABELS and insured != slots.get("insured", "self"):
+        # 换了被保险人：上一个人的年龄、性别、社保不再适用；从画像带入的预算也作废
+        # （画像里是本人的预算）。用户自己说的预算保留：多半是这次配置的预算
+        for name in {*PERSON_SLOTS, *slots.get("from_profile", [])}:
+            slots.pop(name, None)  # type: ignore[misc]
+        slots["from_profile"] = []
+        slots["insured"] = insured
     age = _int(raw.get("age"))
     if age is not None and 0 <= age <= 105:
         slots["age"] = age
@@ -109,7 +133,34 @@ def merge_slots(current: Slots, raw: Mapping[str, Any]) -> Slots:
     life = _money(raw.get("life_annual_premium"))
     if life is not None:
         slots["life_annual_premium"] = str(life)
+    # 用户自己说了的值不再算「来自画像」
+    if slots.get("from_profile"):
+        slots["from_profile"] = [
+            n for n in slots["from_profile"] if n not in raw or slots.get(n) == current.get(n)
+        ]
     return slots
+
+
+def prefill(slots: Slots, known: Mapping[str, Any]) -> Slots:
+    """缺的必填槽位用画像补上（known 来自 profile.profile_slots），用户说过的不覆盖。"""
+    out = Slots(**slots)
+    filled = list(out.get("from_profile", []))
+    for name in REQUIRED_SLOTS:
+        if name not in out and name in known:
+            out[name] = known[name]  # type: ignore[literal-required]
+            filled.append(name)
+    if filled:
+        out["from_profile"] = filled
+    return out
+
+
+def profile_notice(slots: Slots) -> str:
+    """告诉用户哪些信息是从画像带入的：用户可能已经换了城市、有了社保。"""
+    names = slots.get("from_profile") or []
+    if not names:
+        return ""
+    known = describe_slots(Slots(**{n: slots[n] for n in names if n in slots}))  # type: ignore[literal-required, typeddict-item]
+    return f"已从您的画像带入：{known}；如有变化请直接告诉我。"
 
 
 def missing_slots(slots: Slots) -> list[str]:
@@ -123,6 +174,8 @@ def ask_for(missing: Sequence[str]) -> str:
 
 def describe_slots(slots: Slots) -> str:
     parts = []
+    if slots.get("insured", "self") != "self":
+        parts.append("为" + INSURED_LABELS[slots["insured"]] + "配置")
     if "age" in slots:
         parts.append(f"{slots['age']} 周岁")
     if "gender" in slots:

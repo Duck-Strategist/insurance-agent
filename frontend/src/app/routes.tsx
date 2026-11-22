@@ -13,6 +13,7 @@ import { NotFoundPage } from '../pages/NotFoundPage'
 import { ProductDetailPage } from '../pages/ProductDetailPage'
 import { ProductsPage } from '../pages/ProductsPage'
 import { PlansPage } from '../pages/PlansPage'
+import { ProfilePage } from '../pages/ProfilePage'
 import { QuotesPage } from '../pages/QuotesPage'
 
 export const routes: RouteObject[] = [
@@ -37,6 +38,14 @@ export const routes: RouteObject[] = [
         element: (
           <RequireLogin>
             <PlansPage />
+          </RequireLogin>
+        ),
+      },
+      {
+        path: 'profile',
+        element: (
+          <RequireLogin>
+            <ProfilePage />
           </RequireLogin>
         ),
       },

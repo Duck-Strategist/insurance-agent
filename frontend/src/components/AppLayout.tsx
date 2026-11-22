@@ -9,7 +9,6 @@ const NAV_ITEMS = [
   { key: '/', label: <Link to="/">首页</Link> },
   { key: '/products', label: <Link to="/products">保险产品</Link> },
   { key: '/chat', label: <Link to="/chat">智能顾问</Link> },
-  // 后续里程碑加入：我的画像
 ]
 const ADMIN_ITEMS = [
   { key: '/admin/documents', label: <Link to="/admin/documents">条款管理</Link> },

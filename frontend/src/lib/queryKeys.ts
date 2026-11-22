@@ -17,5 +17,6 @@ export const queryKeys = {
   threads: [USER_SCOPE, 'threads'] as const,
   quotes: [USER_SCOPE, 'quotes'] as const,
   plans: [USER_SCOPE, 'plans'] as const,
+  profile: [USER_SCOPE, 'profile'] as const,
   threadMessages: (id: string) => [USER_SCOPE, 'threads', id, 'messages'] as const,
 }

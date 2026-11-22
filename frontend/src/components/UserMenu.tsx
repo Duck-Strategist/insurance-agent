@@ -1,6 +1,7 @@
 import {
   CalculatorOutlined,
   FileProtectOutlined,
+  IdcardOutlined,
   LogoutOutlined,
   UserOutlined,
 } from '@ant-design/icons'
@@ -50,11 +51,13 @@ export function UserMenu() {
     <Dropdown
       menu={{
         items: [
+          { key: 'profile', icon: <IdcardOutlined />, label: '我的画像' },
           { key: 'plans', icon: <FileProtectOutlined />, label: '我的方案' },
           { key: 'quotes', icon: <CalculatorOutlined />, label: '我的报价' },
           { key: 'logout', icon: <LogoutOutlined />, label: '退出登录' },
         ],
         onClick: ({ key }) => {
+          if (key === 'profile') navigate('/profile')
           if (key === 'plans') navigate('/plans')
           if (key === 'quotes') navigate('/quotes')
           if (key === 'logout') {

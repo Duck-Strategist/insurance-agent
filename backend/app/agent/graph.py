@@ -1,8 +1,10 @@
-"""对话图（spec §6.1，M4 版本）：
+"""对话图（spec §6.1）：
 
-    START → route ─┬─ clause_qa: prepare（定位产品、改写查询）→ answer（检索 + 带引用生成）
-                   ├─ chitchat / coming_soon（推荐、理赔，M6/M7 实现）/ out_of_scope：固定话术
-                   └─ prepare 发现缺产品或条款未入库：追问 / 说明后结束
+    START ─┬─ route ─┬─ clause_qa: prepare（定位产品、改写查询）→ answer（检索 + 带引用生成）
+           │         ├─ advisor: collect → recommend → present → review（interrupt，M6）
+           │         ├─ claim: claim_prepare（被保险人、名下保单）→ claim_answer（M7）
+           │         └─ chitchat / out_of_scope：固定话术
+           └─ extract_profile（M7，与路由并行）：抽取画像增量，推送 profile_suggestion
 
 约束（spec §6.3，故事 2）：
 - LLM 只能从候选产品里选 id，代码校验；查哪几份条款由代码根据产品决定；
@@ -14,10 +16,12 @@
 - 状态、引用、固定话术走 custom 流（get_stream_writer）。
 """
 
+import asyncio
 import json
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import date
 from typing import Annotated, Any, Literal, Protocol, TypedDict
 
 from langchain_core.language_models import BaseChatModel
@@ -34,21 +38,27 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.agent import prompts
 from app.agent.advisor import (
     DEFAULT_CATEGORIES,
+    INSURED_LABELS,
     Slots,
     ask_for,
     build_plan,
     describe_slots,
     merge_slots,
     missing_slots,
+    prefill,
+    profile_notice,
 )
 from app.agent.llm import parse_json_object
+from app.agent.profile import build_suggestion, held_coverage, profile_slots
 from app.core.config import LlmSettings
 from app.core.logging import get_logger
 from app.models import PlanStatus
 from app.rag.reranker import RerankError
 from app.rag.retriever import Hit, SearchMode, SearchResult
+from app.schemas.profile import ProfileData
 from app.services.plan_service import PlanService
 from app.services.pricing_service import load_candidates
+from app.services.profile_service import ProfileService, member_label, to_data
 
 logger = get_logger(__name__)
 
@@ -80,6 +90,9 @@ class AgentDeps:
     json_llm: BaseChatModel
     answer_llm: BaseChatModel
     settings: LlmSettings
+    # 画像抽取用的模型，默认同 json_llm；和路由并行调用，测试里单独给一个假模型，
+    # 不打乱路由、改写的脚本顺序
+    profile_llm: BaseChatModel | None = None
 
 
 class ProductRef(TypedDict):
@@ -102,6 +115,11 @@ class AgentState(TypedDict, total=False):
     # 本轮内部使用
     catalog: list[ProductRef]
     query: str
+    claim_coverage: list[str]  # 理赔：给模型看的保单信息（产品、保额、生效日期）
+    # 路由沿用了上一轮的产品（用户这句没提产品）
+    products_reused: bool
+    # 上一轮理赔咨询的被保险人：追问换了人时，不能沿用上一个人的保单
+    claim_insured: str | None
 
 
 # ---- 工具函数 ----
@@ -294,6 +312,39 @@ async def present_plan(llm: BaseChatModel, plan: dict[str, Any]) -> str:
     return text_
 
 
+async def load_profile(
+    session_factory: async_sessionmaker[AsyncSession], user_id: int | None
+) -> ProfileData:
+    if user_id is None:
+        return ProfileData()
+    async with session_factory() as session:
+        return to_data(await ProfileService(session).get(user_id))
+
+
+def _user_id(config: RunnableConfig) -> int | None:
+    uid = config.get("configurable", {}).get("user_id")
+    return uid if isinstance(uid, int) else None
+
+
+def merge_hits(groups: Sequence[Sequence[Hit]], limit: int) -> list[Hit]:
+    """几路检索结果按组的先后合并，同一章节（父块）只保留一次。"""
+    out: list[Hit] = []
+    seen: set[int] = set()
+    for group in groups:
+        for h in group:
+            if h.parent_id not in seen and len(out) < limit:
+                seen.add(h.parent_id)
+                out.append(h)
+    return out
+
+
+def _who(insured: str) -> str:
+    if insured == "self":
+        return "您"
+    # 朋友、同事等家人以外的人：说「您他人」不通
+    return "被保险人" if insured == "other" else "您" + INSURED_LABELS[insured]
+
+
 def reply(text_: str, **updates: Any) -> dict[str, Any]:
     """固定话术：通过 custom 流整段发给前端，并写入对话历史。"""
     get_stream_writer()({"type": "token", "text": text_})
@@ -334,24 +385,27 @@ def build_graph(
             intent = "clause_qa"
         # LLM 只能从候选里选：不是整数、不在目录里的 id 一律丢弃（防编造）
         product_ids = [i for i in _as_ids(data.get("product_ids")) if i in valid_ids]
-        if not product_ids and intent == "clause_qa" and last_workflow == "clause_qa":
-            product_ids = last_products
+        reused = False
+        if not product_ids and intent in ("clause_qa", "claim") and last_workflow == intent:
+            product_ids, reused = last_products, bool(last_products)
         logger.info("agent.route", intent=intent, product_ids=product_ids)
-        return {"intent": intent, "product_ids": product_ids, "catalog": catalog}
+        return {
+            "intent": intent,
+            "product_ids": product_ids,
+            "products_reused": reused,
+            "catalog": catalog,
+        }
 
     def after_route(state: AgentState) -> str:
         return {
             "clause_qa": "prepare",
             "chitchat": "chitchat",
             "advisor": "advisor_collect",
-            "claim": "coming_soon",
+            "claim": "claim_prepare",
         }.get(state["intent"], "out_of_scope")
 
     async def chitchat(state: AgentState) -> dict[str, Any]:
         return reply(prompts.GREETING)
-
-    async def coming_soon(state: AgentState) -> dict[str, Any]:
-        return reply(prompts.COMING_SOON[state["intent"]], last_workflow=state["intent"])
 
     async def out_of_scope(state: AgentState) -> dict[str, Any]:
         return reply(prompts.OUT_OF_SCOPE)
@@ -443,8 +497,8 @@ def build_graph(
 
     # ---- 顾问：需求采集 → 方案 → [interrupt 确认] ----
 
-    async def advisor_collect(state: AgentState) -> dict[str, Any]:
-        """从这句话里抽取需求槽位；缺必填项就追问，齐了进入配方案。"""
+    async def advisor_collect(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
+        """从这句话里抽取需求槽位，缺的用画像补上（M7）；仍缺必填项就追问，齐了进入配方案。"""
         slots = state.get("slots") or Slots()
         resp = await deps.json_llm.ainvoke(
             [
@@ -458,13 +512,25 @@ def build_graph(
             ]
         )
         slots = merge_slots(slots, parse_json_object(str(resp.content)))
+        slots = await fill_from_profile(slots, config)
         logger.info("agent.advisor_slots", slots=slots)
         missing = missing_slots(slots)
         if missing:
-            known = describe_slots(slots)
-            text_ = (f"已了解：{known}。" if known else "") + ask_for(missing)
-            return reply(text_, slots=slots, last_workflow="advisor")
+            return reply(ask_missing(slots, missing), slots=slots, last_workflow="advisor")
         return {"slots": slots, "last_workflow": "advisor"}
+
+    async def fill_from_profile(slots: Slots, config: RunnableConfig) -> Slots:
+        if not missing_slots(slots):
+            return slots
+        profile = await load_profile(deps.session_factory, _user_id(config))
+        return prefill(slots, profile_slots(profile, slots.get("insured", "self"), date.today()))
+
+    def ask_missing(slots: Slots, missing: list[str]) -> str:
+        """画像带入的信息在提示里说过了，「已了解」只列用户自己说的，不重复。"""
+        from_profile = set(slots.get("from_profile", []))
+        told = Slots(**{k: v for k, v in slots.items() if k not in from_profile})  # type: ignore[typeddict-item]
+        known = describe_slots(told)
+        return profile_notice(slots) + (f"已了解：{known}。" if known else "") + ask_for(missing)
 
     def after_collect(state: AgentState) -> str:
         return "advisor_recommend" if not missing_slots(state.get("slots") or Slots()) else END
@@ -496,7 +562,8 @@ def build_graph(
         user_id = config["configurable"]["user_id"]
         thread_id = config["configurable"]["thread_id"]
         # 先生成说明再落库：调用模型时连接断开（节点被取消）不会留下无法确认的 pending 方案
-        intro = await present_plan(deps.answer_llm, plan)
+        # 画像带入了哪些信息写在说明前面（代码生成，不经过模型；金额检查只针对模型写的部分）
+        intro = profile_notice(slots) + await present_plan(deps.answer_llm, plan)
         async with deps.session_factory() as session:
             row = await PlanService(session).create_pending(user_id, thread_id, plan)
         card = {**plan, "plan_id": row.id}
@@ -511,7 +578,9 @@ def build_graph(
 
     async def advisor_review(
         state: AgentState, config: RunnableConfig
-    ) -> Command[Literal["advisor_recommend", "advisor_review", "route", "__end__"]]:
+    ) -> Command[
+        Literal["advisor_recommend", "advisor_review", "route", "extract_profile", "__end__"]
+    ]:
         """等用户确认（interrupt）。
 
         恢复值来自方案卡片的按钮（confirm / cancel / edit），或用户直接打字（message）。
@@ -631,20 +700,231 @@ def build_graph(
                     update={"messages": [*said, *out["messages"]]}, goto="advisor_review"
                 )
             await move(PlanStatus.SUPERSEDED)
+            # 换了被保险人（「还是给我老婆配吧」）：用画像补上这个人的信息，补不齐就问
+            slots = await fill_from_profile(slots, config)
+            missing = missing_slots(slots)
+            if missing:
+                out = reply(ask_missing(slots, missing))
+                return Command(
+                    update={
+                        "messages": [*said, *out["messages"]],
+                        "slots": slots,
+                        "plan": None,
+                        "plan_id": None,
+                        "last_workflow": "advisor",
+                    },
+                    goto=["extract_profile"],
+                )
             writer({"type": "status", "text": "正在按新的需求调整方案…"})
             return Command(
                 update={"messages": said, "slots": slots, "plan": None, "plan_id": None},
-                goto="advisor_recommend",
+                goto=["advisor_recommend", "extract_profile"],
             )
 
-        # 和方案无关（问条款等）：方案作废为 expired，这句话交给路由按普通消息处理
+        # 和方案无关（问条款等）：方案作废为 expired，这句话交给路由按普通消息处理；
+        # 打字的话同样要抽取画像（按钮操作没有新信息，不抽）
         await move(PlanStatus.EXPIRED)
-        return Command(update={"messages": said, "plan": None, "plan_id": None}, goto="route")
+        return Command(
+            update={"messages": said, "plan": None, "plan_id": None},
+            goto=["route", "extract_profile"],
+        )
+
+    # ---- 理赔咨询（M7，spec §6.2、D18）----
+
+    async def claim_prepare(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
+        """确定出险的人和要查的保单：用户提到的产品优先，否则用画像里这个人名下登记的
+        库内产品；都没有就追问（并建议去画像登记），只登记了库外产品就给通用指引。"""
+        get_stream_writer()({"type": "status", "text": "正在理解问题…"})
+        question = last_question(state)
+        resp = await deps.json_llm.ainvoke(
+            [
+                HumanMessage(
+                    content=prompts.CLAIM_EXTRACT.format(
+                        history=format_history(state["messages"], cfg.history_turns),
+                        question=question,
+                    )
+                )
+            ]
+        )
+        data = parse_json_object(str(resp.content))
+        insured = data.get("insured")
+        insured = insured if insured in INSURED_LABELS else "self"
+        query = str(data.get("query") or "").strip()[:200] or question
+
+        profile = await load_profile(deps.session_factory, _user_id(config))
+        by_id = {p["id"]: p for p in state.get("catalog", [])}
+        held = held_coverage(profile, insured)
+        mentioned = [i for i in state.get("product_ids", []) if i in by_id]
+        if state.get("products_reused") and insured != state.get("claim_insured"):
+            # 「那我老婆住院呢」：路由沿用了上一轮（另一个人）的产品，改查这个人名下的保单
+            mentioned = []
+        chosen = mentioned or list(
+            dict.fromkeys(c.product_id for c in held if c.product_id in by_id)
+        )
+        if not chosen:
+            off = [c.product_name for c in held if c.product_id is None]
+            if off:
+                text_ = prompts.CLAIM_OFF_CATALOG.format(who=_who(insured), names="、".join(off))
+            else:
+                names = "、".join(p["name"] for p in by_id.values() if p["document_id"] is not None)
+                text_ = prompts.CLAIM_NEED_COVERAGE.format(who=_who(insured), names=names)
+            return reply(
+                text_, last_workflow="claim", product_ids=[], query="", claim_insured=insured
+            )
+        products = [by_id[i] for i in chosen if i is not None]
+        if all(p["document_id"] is None for p in products):
+            return reply(
+                prompts.NO_DOCUMENT.format(names="、".join(p["name"] for p in products)),
+                last_workflow="claim",
+                query="",
+                claim_insured=insured,
+            )
+
+        members = {m.id: member_label(m) for m in profile.family}
+        lines = []
+        for p in products:
+            regs = [c for c in profile.existing_coverage if c.product_id == p["id"]]
+            if not regs:
+                lines.append(f"- {p['name']}（用户在对话中提到，画像里没有登记保额和生效日期）")
+            for c in regs:
+                who = "本人" if c.insured == "self" else members.get(c.insured, "家人")
+                extra = [f"被保险人：{who}"]
+                if c.sum_assured is not None:
+                    extra.append(f"保额 {c.sum_assured:,.2f} 元")
+                start = c.start_date
+                if start is None:
+                    extra.append("生效日期未登记")
+                else:
+                    # 天数由代码算好：实测模型自己推算「生效日 + 90 天」会算错日期
+                    days = (date.today() - start).days
+                    extra.append(
+                        f"生效日期 {start.isoformat()}"
+                        + (f"，到今天已生效 {days} 天" if days >= 0 else "，还未生效")
+                    )
+                lines.append(f"- {p['name']}（{'，'.join(extra)}）")
+        return {
+            "product_ids": [p["id"] for p in products],
+            "query": query,
+            "claim_coverage": lines,
+            "claim_insured": insured,
+        }
+
+    def after_claim_prepare(state: AgentState) -> str:
+        return "claim_answer" if state.get("query") else END
+
+    async def claim_search(query: str, doc_ids: list[int], alt: Sequence[str]) -> list[Hit]:
+        try:
+            result = await deps.retriever.search(
+                query, mode=SearchMode.HYBRID_RERANK, document_ids=doc_ids, alt_queries=alt
+            )
+        except RerankError as exc:
+            logger.warning("agent.rerank_failed", error=str(exc))
+            result = await deps.retriever.search(
+                query, mode=SearchMode.HYBRID, document_ids=doc_ids, alt_queries=alt
+            )
+        return result.hits
+
+    async def claim_answer(state: AgentState) -> dict[str, Any]:
+        """四路检索并行：问题本身、问题 + 责任免除、等待期、理赔材料。「能不能赔」的答案常在
+        责任免除和等待期里，而用户不会这么问（spec Q14）；材料清单的章节和问题的措辞几乎不重合。
+        只检索问题本身时，实测等待期章节进不了前 5，模型拿着保单生效日期也判断不了等待期。"""
+        writer = get_stream_writer()
+        question, query = last_question(state), state["query"]
+        doc_ids = sorted(
+            {
+                p["document_id"]
+                for p in state.get("catalog", [])
+                if p["id"] in state.get("product_ids", []) and p["document_id"] is not None
+            }
+        )
+        writer({"type": "status", "text": "正在检索保单条款…"})
+        alt = [question] if question != query else []
+        main, exclusions, waiting, materials = await asyncio.gather(
+            claim_search(query, doc_ids, alt),
+            claim_search(query + prompts.CLAIM_EXCLUSION_SUFFIX, doc_ids, ()),
+            claim_search(prompts.CLAIM_WAITING_QUERY, doc_ids, ()),
+            claim_search(prompts.CLAIM_MATERIALS_QUERY, doc_ids, ()),
+        )
+        hits = merge_hits([main[:4], exclusions[:2], waiting[:1], materials[:2]], limit=9)
+        if not hits:
+            return reply(prompts.NOT_FOUND, last_workflow="claim", query="")
+
+        writer({"type": "status", "text": "正在整理理赔要点…"})
+        asked = question if query == question else f"{question}\n（结合上下文理解为：{query}）"
+        resp = await deps.answer_llm.ainvoke(
+            [
+                SystemMessage(content=prompts.CLAIM_SYSTEM),
+                HumanMessage(
+                    content=prompts.CLAIM_USER.format(
+                        today=date.today().isoformat(),
+                        coverage="\n".join(state.get("claim_coverage", [])) or "（无）",
+                        sections=format_sections(hits, cfg.context_chars_per_section),
+                        n=len(hits),
+                        question=asked,
+                    )
+                ),
+            ]
+        )
+        content = str(resp.content)
+        if prompts.CLAIM_DISCLAIMER not in content:
+            # 「以保险公司审核为准」由代码保证，不依赖模型记得写
+            tail = "\n\n" + prompts.CLAIM_DISCLAIMER
+            writer({"type": "token", "text": tail})
+            content += tail
+        citations = extract_citations(content, hits)
+        writer({"type": "citations", "items": citations})
+        return {
+            "messages": [AIMessage(content=content, additional_kwargs={"citations": citations})],
+            "last_workflow": "claim",
+            "query": "",
+        }
+
+    # ---- 画像抽取（M7，spec D20）：与路由并行，只推送建议，不写库 ----
+
+    async def extract_profile(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
+        user_id = _user_id(config)
+        question = last_question(state)
+        if user_id is None or not question or GREETING.match(question):
+            return {}
+        try:
+            current = await load_profile(deps.session_factory, user_id)
+            catalog = await load_catalog(deps.session_factory)
+            llm = deps.profile_llm or deps.json_llm
+            resp = await llm.ainvoke(
+                [
+                    HumanMessage(
+                        content=prompts.PROFILE_EXTRACT.format(
+                            products="\n".join(f"- {p['id']}：{p['name']}" for p in catalog),
+                            history=format_history(state["messages"], cfg.history_turns),
+                            question=question,
+                            today=date.today().isoformat(),
+                        )
+                    )
+                ]
+            )
+            suggestion = build_suggestion(
+                current,
+                parse_json_object(str(resp.content)),
+                {p["id"]: (p["name"], p["category"]) for p in catalog},
+                date.today(),
+            )
+        except Exception:
+            # 抽取是附带功能：失败只记日志，不影响这一轮的回答
+            logger.warning("agent.profile_extract_failed", exc_info=True)
+            return {}
+        if suggestion is not None:
+            logger.info("agent.profile_suggestion", fields=[i.label for i in suggestion.items])
+            get_stream_writer()(
+                {"type": "profile_suggestion", "suggestion": suggestion.model_dump(mode="json")}
+            )
+        return {}
 
     graph = StateGraph(AgentState)
     graph.add_node("route", route)
+    graph.add_node("extract_profile", extract_profile)
     graph.add_node("chitchat", chitchat)
-    graph.add_node("coming_soon", coming_soon)
+    graph.add_node("claim_prepare", claim_prepare)
+    graph.add_node("claim_answer", claim_answer)
     graph.add_node("out_of_scope", out_of_scope)
     graph.add_node("prepare", prepare)
     graph.add_node("answer", answer)
@@ -653,15 +933,18 @@ def build_graph(
     graph.add_node("advisor_present", advisor_present)
     graph.add_node("advisor_review", advisor_review)
     graph.add_edge(START, "route")
+    graph.add_edge(START, "extract_profile")
+    graph.add_edge("extract_profile", END)
     graph.add_conditional_edges(
         "route",
         after_route,
-        ["prepare", "chitchat", "coming_soon", "out_of_scope", "advisor_collect"],
+        ["prepare", "chitchat", "claim_prepare", "out_of_scope", "advisor_collect"],
     )
+    graph.add_conditional_edges("claim_prepare", after_claim_prepare, ["claim_answer", END])
     graph.add_conditional_edges("advisor_collect", after_collect, ["advisor_recommend", END])
     graph.add_conditional_edges("advisor_recommend", after_recommend, ["advisor_present", END])
     graph.add_edge("advisor_present", "advisor_review")
     graph.add_conditional_edges("prepare", after_prepare, ["answer", END])
-    for node in ("chitchat", "coming_soon", "out_of_scope", "answer"):
+    for node in ("chitchat", "out_of_scope", "answer", "claim_answer"):
         graph.add_edge(node, END)
     return graph.compile(checkpointer=checkpointer)

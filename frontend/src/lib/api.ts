@@ -13,6 +13,8 @@ import type {
   PlanAction,
   PricingInfo,
   Product,
+  Profile,
+  ProfileData,
   ProductCategory,
   SavedPlan,
   QuoteParams,
@@ -190,6 +192,16 @@ async function* streamEvents(
   for await (const { event, data } of readSse(response.body)) {
     yield { type: event, ...(JSON.parse(data) as object) } as ChatEvent
   }
+}
+
+// ---- 我的画像 ----
+export const profileApi = {
+  get: () => request<Profile>('/api/v1/profile'),
+  save: (data: ProfileData) =>
+    request<Profile>('/api/v1/profile', { method: 'PUT', body: json(data) }),
+  /** 对话里的建议：服务端增量合并（不删除已有内容） */
+  applySuggestion: (patch: Record<string, unknown>) =>
+    request<Profile>('/api/v1/profile/suggestions', { method: 'POST', body: json(patch) }),
 }
 
 // ---- 我的方案 ----

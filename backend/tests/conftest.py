@@ -18,18 +18,51 @@ os.environ["RAG__DASHSCOPE_API_KEY"] = ""
 os.environ["LLM__API_KEY"] = ""
 os.environ["RAG__DATA_DIR"] = tempfile.mkdtemp(prefix="insurance-agent-test-")
 
+import asyncio  # noqa: E402
 from collections.abc import AsyncIterator  # noqa: E402
+from typing import Any  # noqa: E402
 
 import pytest  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
 from sqlalchemy import text  # noqa: E402
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine  # noqa: E402
+from sqlalchemy.ext.asyncio import (  # noqa: E402
+    AsyncConnection,
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from app.api.deps import get_session  # noqa: E402
 from app.core.config import AuthSettings, Settings, get_settings  # noqa: E402
 from app.main import create_app  # noqa: E402
 
 TEST_JWT_SECRET = "test-jwt-secret-with-at-least-32-bytes"
+
+
+def serial_sessionmaker(bind: AsyncConnection) -> async_sessionmaker[AsyncSession]:
+    """测试里所有会话共用一个连接（外层事务最后回滚），而一个连接不能并发使用。
+    对话图的画像抽取与路由并行，两边会同时开会话：这里让 `async with` 的会话排队。
+    生产环境每个会话从连接池取自己的连接，不需要这样。"""
+    lock = asyncio.Lock()
+
+    class SerialSession(AsyncSession):
+        async def __aenter__(self) -> "SerialSession":
+            await lock.acquire()
+            return self
+
+        async def __aexit__(self, *exc: Any) -> None:
+            try:
+                await super().__aexit__(*exc)
+            finally:
+                lock.release()
+
+    return async_sessionmaker(
+        bind=bind,
+        class_=SerialSession,
+        join_transaction_mode="create_savepoint",
+        expire_on_commit=False,
+    )
 
 
 @pytest.fixture(scope="session")

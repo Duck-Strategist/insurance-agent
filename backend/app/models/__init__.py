@@ -9,6 +9,7 @@ from app.models.eval_run import EvalRun
 from app.models.plan import Plan, PlanStatus
 from app.models.pricing import Quote, RateBookRecord
 from app.models.product import Product, ProductCategory, ProductStatus
+from app.models.profile import UserProfile
 from app.models.user import User, UserRole
 
 __all__ = [
@@ -26,5 +27,6 @@ __all__ = [
     "Quote",
     "RateBookRecord",
     "User",
+    "UserProfile",
     "UserRole",
 ]
