@@ -48,6 +48,7 @@ const HEADING_LABELS: Record<string, string> = {
   dec1: '1.',
   dec2: '1.1',
   dec3: '1.1.1',
+  dec4: '1.1.1.1',
 }
 
 const PARENTS_PAGE_SIZE = 20
@@ -208,11 +209,17 @@ export function AdminDocumentsPage() {
         const levels = d.stats.levels
         if (!levels) return '—'
         const order = Object.entries(levels).sort((a, b) => a[1] - b[1])
+        const label = (k: string) => `${HEADING_LABELS[k] ?? k}×${d.stats.headings?.[k] ?? 0}`
+        // 最高一级是「第X部分」时，各部分内部的编号层级分别分配，全文统一的 L 层级没有意义
+        const text = d.stats.levels_per_part
+          ? `${label('part')} · 部分内各自分级：${order
+              .filter(([k]) => k !== 'part')
+              .map(([k]) => label(k))
+              .join('、')}`
+          : order.map(([k, lv]) => `L${lv} ${label(k)}`).join(' · ')
         return (
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            {order
-              .map(([k, lv]) => `L${lv} ${HEADING_LABELS[k] ?? k}×${d.stats.headings?.[k] ?? 0}`)
-              .join(' · ')}
+            {text}
           </Typography.Text>
         )
       },

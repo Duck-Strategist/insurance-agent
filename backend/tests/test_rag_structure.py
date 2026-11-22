@@ -631,3 +631,97 @@ def test_bare_decimal_number_is_still_a_heading() -> None:
         "2.3.3 可选责任 > 2.3.3.3 重大疾病多次给付保险金 > （1）第二次重大疾病保险金",
         "2.3.3 可选责任 > 2.3.3.4 > （1）首次治疗津贴保险金",
     ]
+
+
+def test_bare_number_on_unmarked_line_is_body() -> None:
+    # 只剩编号的标题只认 MinerU 标了 # 的行；正文里单独一行的数字不能变成章节
+    md = """
+## 第一条 保险金额
+
+基本保险金额的年复利增长比例为
+
+1.25
+
+逐年计算。
+"""
+    assert joined_paths(md) == ["第一条 保险金额"]
+    assert "1.25" in build_sections(md).sections[0].text
+
+
+def test_numeric_table_after_toc_marker_is_kept() -> None:
+    # 费率表的单元格是纯数字，不是「编号 + 标题」，不能当成目录删掉
+    md = """
+## 条款目录
+
+{table}
+
+## 1.1 基本保险金额
+
+正文。
+""".format(
+        table="<table><tr><td>0.85</td><td>1.25</td></tr><tr><td>2.10</td><td>3.45</td></tr>"
+        "<tr><td>4.20</td><td>5.75</td></tr></table>"
+    )
+    assert "1.25" in build_sections(md).sections[0].text
+
+
+def test_cleaned_marked_line_that_is_body_keeps_original_text() -> None:
+    # 标了 # 的句子最后进了正文：写入原文（含 <sub> 标签），正文一个字不改（D28）
+    md = """
+# 复星联合医联有盟重大疾病保险（互联网）条款
+
+## 阅读指引
+
+## <sub>条款是保险合同的重要内容，为充分保障您的权益，请仔细阅读本条款</sub>
+"""
+    body = build_sections(md).sections[0].text
+    assert "<sub>条款是保险合同的重要内容" in body
+
+
+def test_multi_column_toc_line_with_three_digit_numbers_is_removed() -> None:
+    md = """
+## 8.1 重度疾病
+
+8.1.101 严重哮喘 8.1.102 严重席汉氏综合征 8.1.103 败血症
+
+## 8.1.104 严重瑞氏综合征
+
+指一种急性脑病。
+"""
+    result = build_sections(md)
+    assert result.stats["removed_lines"].get("toc") == 1  # type: ignore[union-attr]
+    assert joined_paths(md) == ["8.1 重度疾病 > 8.1.104 严重瑞氏综合征"]
+
+
+def test_per_part_levels_are_capped_and_reported() -> None:
+    from app.rag.structure import MAX_LEVEL, _line_levels
+
+    kinds: list[str | None] = ["part", *[f"k{i}" for i in range(10)]]
+    levels = {"part": 1, **{f"k{i}": min(i + 2, MAX_LEVEL) for i in range(10)}}
+    assert max(lv for lv in _line_levels(kinds, levels) if lv is not None) == MAX_LEVEL
+    assert build_sections(PART_RESET).stats["levels_per_part"] is True
+    assert build_sections(DEEP_NUMBERS).stats["levels_per_part"] is False
+
+
+def test_unmarked_bare_number_continuing_sequence_is_heading() -> None:
+    # 信美：病种名被双栏排版挤走，只剩没标 # 的「8.1.95」独占一行；接着 8.1.93 往下数，算标题
+    md = """
+## 8.1 重度疾病
+
+## 8.1.93 肝豆状核变性
+
+指由于铜代谢障碍所引起的一种疾病。
+
+8.1.95
+
+急性肺损伤或急性呼吸窘迫综合征一种表现为无心脏衰竭的肺水肿。
+
+8.1.200
+
+这一行的编号跳得太远，不是标题。
+"""
+    assert joined_paths(md) == [
+        "8.1 重度疾病 > 8.1.93 肝豆状核变性",
+        "8.1 重度疾病 > 8.1.95",
+    ]
+    assert "8.1.200" in build_sections(md).sections[-1].text

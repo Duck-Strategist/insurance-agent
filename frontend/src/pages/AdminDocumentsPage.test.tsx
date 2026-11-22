@@ -150,3 +150,21 @@ test('父块预览走服务端分页，能翻到 200 条以后', async () => {
   const urls = fetchMock.mock.calls.map(([u]) => String(u))
   expect(urls.some((u) => u.includes('/parents?offset=280&limit=20'))).toBe(true)
 })
+
+test('各部分分别分级的条款不显示全文统一的层级号', async () => {
+  useAuthStore.setState({ token: 't', user: admin })
+  const perPart = doc({
+    stats: {
+      levels: { part: 1, article: 2, cn_paren: 3 },
+      levels_per_part: true,
+      headings: { part: 7, article: 26, cn_paren: 44 },
+    },
+  })
+  mockFetch({
+    '/health': healthOk,
+    '/api/v1/auth/me': () => jsonResponse(admin),
+    '/api/v1/admin/documents': () => jsonResponse([perPart]),
+  })
+  renderAt('/admin/documents')
+  expect(await screen.findByText('第X部分×7 · 部分内各自分级：第X条×26、（一）×44')).toBeInTheDocument()
+})

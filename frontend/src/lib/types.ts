@@ -41,6 +41,8 @@ export interface DocumentStats {
   removed_lines?: Record<string, number>
   headings?: Record<string, number>
   levels?: Record<string, number>
+  /** 为 true 时各「第X部分」内部分别分配层级，levels 只是全文首次出现顺序 */
+  levels_per_part?: boolean
   sections?: number
   title?: string | null
   max_child_chars?: number

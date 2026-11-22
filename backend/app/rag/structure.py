@@ -33,15 +33,16 @@ HEADING_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("cn_dun", re.compile(rf"^[{CN_NUM}]+、")),  # 一、二、
     ("num_paren", re.compile(r"^[（(]\d{1,2}[)）]")),  # （1）（2）
     # 末级编号允许 3 位：信美的重度疾病编到 8.1.117（曾因只认 2 位，8.1.100 以后的病种全部识别不出）
-    ("dec4", re.compile(r"^\d{1,2}\.\d{1,2}\.\d{1,2}\.\d{1,3}(?!\d)\.?(?=[\s　]|[^\d.]|$)")),
-    ("dec3", re.compile(r"^\d{1,2}\.\d{1,2}\.\d{1,3}(?!\d)\.?(?=[\s　]|[^\d.]|$)")),
-    # 末尾的 |$：MinerU 有时只留下编号、标题文字丢了（达尔文 12 号的「## 2.3.3.4」），
-    # 仍要当作该级标题，否则它下面的（1）（2）（3）会挂到上一个条目下
-    ("dec2", re.compile(r"^\d{1,2}\.\d{1,3}(?![\d.])(?=[\s　]|[^\d]|$)")),
+    ("dec4", re.compile(r"^\d{1,2}\.\d{1,2}\.\d{1,2}\.\d{1,3}(?!\d)\.?(?=[\s　]|[^\d.])")),
+    ("dec3", re.compile(r"^\d{1,2}\.\d{1,2}\.\d{1,3}(?!\d)\.?(?=[\s　]|[^\d.])")),
+    ("dec2", re.compile(r"^\d{1,2}\.\d{1,3}(?![\d.])(?=[\s　]|[^\d])")),
     ("dec1", re.compile(r"^\d{1,2}[\.．、](?![\d])")),
 ]
 # "1 合同订立"（数字后无点）只在 MinerU 标了 # 时才认作标题，否则容易误伤正文里的数字开头
 DEC1_NO_DOT = re.compile(r"^\d{1,2}\s+[^\d\s.．]")
+# 只剩编号、标题文字丢了（达尔文 12 号的「## 2.3.3.4」）：仍是该级标题，否则它下面的
+# （1）（2）（3）会挂到上一个条目下。只认 MinerU 标了 # 的行——正文里单独一行的「1.25」是数字不是标题
+BARE_DECIMAL = re.compile(r"^\d{1,2}(?:\.\d{1,3}){1,3}\.?$")
 # 数字编号的天然层级：1. < 1.1 < 1.1.1，无论首次出现顺序如何都保持这个相对关系
 DECIMAL_ORDER = ["dec1", "dec2", "dec3", "dec4"]
 
@@ -67,7 +68,7 @@ PAGE_NUMBER_LINE = re.compile(
 TOC_LINE = re.compile(r"(\.{4,}|…{2,}|·{4,})\s*[\d.、]+\s*$")
 TOC_MARKER = re.compile(r"^(条款)?目\s*录$")
 # 一行里的编号（行首或空格后），用来识别"三栏目录挤成一行"
-NUMBER_TOKEN = re.compile(r"(?:^|\s)\d{1,2}(?:[.．]\d{1,2}){0,2}[.．]?\s+\S")
+NUMBER_TOKEN = re.compile(r"(?:^|\s)\d{1,2}(?:[.．]\d{1,3}){0,3}[.．]?\s+\S")
 # 双栏合并行：编号 + 短标题（无标点） + 空格 + 正文
 INLINE_HEADING = re.compile(
     r"^(?P<head>(?:\d{1,2}\.\d{1,2}(?:\.\d{1,3}){0,2}|第[" + CN_NUM + r"\d]+条)\s*"
@@ -80,7 +81,8 @@ FIRST_ORDINAL = re.compile(
 ARABIC_CHAPTER = re.compile(r"^第\s*(\d{1,2})\s*章")
 MD_HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
 # 标题里的排版噪声：PDF 图标字体的私用区字符（如「##  条款目录」前的 U+F043 图标）、
-# MinerU 给小字号文字加的 <sub> 标签。只清理 # 标题行，正文不动（D28）。
+# MinerU 给小字号文字加的 <sub> 标签。只用于标题识别和章节路径；这行如果最终是正文，
+# 写入的是原文（Line.body_text），正文不动（D28）。
 # 不清理的话「条款目录」认不出，整块目录留在正文里
 HEADING_NOISE = re.compile("[\ue000-\uf8ff]|</?sub>")
 
@@ -97,6 +99,13 @@ class Line:
     text: str
     marked_heading: bool  # MinerU 输出时带 # 标记
     is_table: bool = False
+    # # 行清理掉图标字符、<sub> 标签之前的原文。这行最后没被认作标题、进了正文时用原文，
+    # 保证正文一个字不改（D28）
+    original: str | None = None
+
+    @property
+    def body_text(self) -> str:
+        return self.original if self.original is not None else self.text
 
 
 @dataclass
@@ -138,7 +147,11 @@ def _split_lines(markdown: str) -> list[Line]:
             continue
         m = MD_HEADING.match(stripped)
         if m:
-            lines.append(Line(HEADING_NOISE.sub("", m.group(2)).strip(), marked_heading=True))
+            raw = m.group(2).strip()
+            cleaned = HEADING_NOISE.sub("", raw).strip()
+            lines.append(
+                Line(cleaned, marked_heading=True, original=raw if cleaned != raw else None)
+            )
         else:
             lines.append(Line(stripped, marked_heading=False))
     if table_buf:  # 未闭合的表格也保留
@@ -181,6 +194,8 @@ def heading_kind(line: Line) -> str | None:
             return kind
     if line.marked_heading and DEC1_NO_DOT.match(text):
         return "dec1"
+    if line.marked_heading and BARE_DECIMAL.match(text):
+        return DECIMAL_ORDER[text.rstrip(".").count(".")]
     return None
 
 
@@ -239,14 +254,15 @@ def _is_prose(line: Line) -> bool:
 
 
 TABLE_CELL = re.compile(r"<td[^>]*>(.*?)</td>", re.S)
-TOC_ENTRY = re.compile(r"^\d{1,2}(?:\.\d{1,3}){1,3}\s*\S")
+# 编号后必须紧跟标题文字（汉字或书名号/引号），「1.25」「0.85」这类费率数字不算
+TOC_ENTRY = re.compile(r"^\d{1,2}(?:\.\d{1,3}){1,3}(?![\d.])\s*[一-鿿《“\"]")
 
 
 def _is_toc_table(line: Line) -> bool:
     """目录被 MinerU 识别成表格（信美：「9.29 复利」「9.30 有效身份证件」……）。
 
-    判定：非空单元格里至少 70% 是「编号 + 短标题」，且没有句号。正文里的表格
-    （费率表、疾病定义表）单元格是数字或句子，不会满足。
+    判定：非空单元格里至少 70% 是「编号 + 标题文字」，且没有句号。疾病定义表的单元格是句子
+    （有句号）；费率表的单元格是纯数字，编号后面没有标题文字，都不会满足。
     """
     if not line.is_table or "。" in line.text:
         return False
@@ -387,6 +403,35 @@ def _assign_levels(kinds_in_order: list[str]) -> dict[str, int]:
     return {k: min(i + 1, MAX_LEVEL) for i, k in enumerate(seen)}
 
 
+def _accept_bare_numbers_in_sequence(
+    lines: list[Line], kinds: list[str | None]
+) -> list[str | None]:
+    """没标 # 的「只有编号」行：紧接上一个同级编号往下数时（如 8.1.93 之后的 8.1.95）也算标题。
+
+    信美的双栏排版把病种名挤到了别处，只剩「8.1.95」「8.1.110」独占一行；不认的话两个病种的定义
+    会并进上一个病种。正文里单独一行的「1.25」不会恰好接在 1.23、1.24 这样的标题后面。
+    """
+    out = list(kinds)
+    last: tuple[int, ...] | None = None
+    for i, (ln, kind) in enumerate(zip(lines, kinds, strict=True)):
+        if kind in DECIMAL_ORDER:
+            last = decimal_numbers(ln.text)
+            continue
+        if kind is not None or ln.marked_heading or not BARE_DECIMAL.match(ln.text):
+            continue
+        nums = decimal_numbers(ln.text)
+        if (
+            nums is not None
+            and last is not None
+            and len(nums) == len(last)
+            and nums[:-1] == last[:-1]
+            and 0 < nums[-1] - last[-1] <= 2
+        ):
+            out[i] = DECIMAL_ORDER[len(nums) - 1]
+            last = nums
+    return out
+
+
 def _line_levels(kinds: list[str | None], levels: dict[str, int]) -> list[int | None]:
     """每行标题的层级。
 
@@ -403,7 +448,7 @@ def _line_levels(kinds: list[str | None], levels: dict[str, int]) -> list[int | 
     def assign(segment: list[str | None]) -> None:
         inner = _assign_levels([k for k in segment if k is not None and k != "part"])
         for k in segment:
-            out.append(None if k is None else 1 if k == "part" else inner[k] + 1)
+            out.append(None if k is None else 1 if k == "part" else min(inner[k] + 1, MAX_LEVEL))
 
     for i, k in enumerate(kinds):
         if k == "part" and i > segment_start:
@@ -432,7 +477,7 @@ def build_sections(markdown: str, *, title_hint: str | None = None) -> Structure
             lines = lines[:i] + lines[i + 1 :]
             break
 
-    kinds = [heading_kind(ln) for ln in lines]
+    kinds = _accept_bare_numbers_in_sequence(lines, [heading_kind(ln) for ln in lines])
     # 章节用"第 N 章 + N.M"编号时，章已经占了第一级，正文里的"1. 身故保险金""2. ……"只是列表项。
     # 否则"2.2 责任免除"会被挂到列表项"2. 重大自然灾害意外身故保险金"下面
     if "dec2" in kinds and any(
@@ -442,6 +487,7 @@ def build_sections(markdown: str, *, title_hint: str | None = None) -> Structure
         kinds = [None if k == "dec1" else k for k in kinds]
     levels = _assign_levels([k for k in kinds if k is not None])
     line_levels = _line_levels(kinds, levels)
+    per_part = bool(levels) and min(levels, key=lambda k: levels[k]) == "part"
 
     sections: list[Section] = []
     # 栈里记录 (层级, 标题)。入栈时弹出所有层级 >= 当前层级的标题：
@@ -471,7 +517,7 @@ def build_sections(markdown: str, *, title_hint: str | None = None) -> Structure
                 # 如附表里的疾病名"恶性肿瘤——重度"：同一锚点下的多个互为兄弟
                 kind, level = "unnumbered", anchor_level + 1
         if level is None:
-            current.body.append(ln.text)
+            current.body.append(ln.body_text)
             continue
         heading_counts[kind or ""] += 1
         sections.append(current)
@@ -496,6 +542,8 @@ def build_sections(markdown: str, *, title_hint: str | None = None) -> Structure
         "removed_lines": dict(removed),
         "headings": dict(heading_counts),
         "levels": levels,
+        # True 时 levels 只代表全文首次出现顺序；实际每个「第X部分/章」内部分别分配（spec Q12）
+        "levels_per_part": per_part,
         "sections": len(non_empty),
         "title": title or title_hint,
     }
