@@ -3,6 +3,8 @@ import type { RouteObject } from 'react-router'
 import { AppLayout } from '../components/AppLayout'
 import { RequireAdmin } from '../components/RequireAdmin'
 import { AdminDocumentsPage } from '../pages/AdminDocumentsPage'
+import { AdminEvalRunsPage } from '../pages/AdminEvalRunsPage'
+import { AdminSearchPage } from '../pages/AdminSearchPage'
 import { HomePage } from '../pages/HomePage'
 import { LoginPage } from '../pages/LoginPage'
 import { NotFoundPage } from '../pages/NotFoundPage'
@@ -22,6 +24,22 @@ export const routes: RouteObject[] = [
         element: (
           <RequireAdmin>
             <AdminDocumentsPage />
+          </RequireAdmin>
+        ),
+      },
+      {
+        path: 'admin/search',
+        element: (
+          <RequireAdmin>
+            <AdminSearchPage />
+          </RequireAdmin>
+        ),
+      },
+      {
+        path: 'admin/evals',
+        element: (
+          <RequireAdmin>
+            <AdminEvalRunsPage />
           </RequireAdmin>
         ),
       },

@@ -35,6 +35,20 @@ class LogSettings(BaseModel):
 DEFAULT_DATA_DIR = Path(__file__).resolve().parents[3] / "data"
 
 
+class RetrievalSettings(BaseModel):
+    """检索参数由代码固定，不暴露给 LLM（spec §6.3）。"""
+
+    top_k: int = 5  # 返回的父块数
+    recall_k: int = 30  # 每一路召回的子块数
+    rrf_k: int = 60  # RRF 常数，原论文取 60
+    fulltext_weight: float = 1.0  # RRF 中全文召回一路的权重（向量一路为 1）
+    rerank_candidates: int = 30  # 融合后送去重排的子块数
+    hnsw_ef_search: int = 100
+    # 全文召回时忽略出现在超过这个比例子块里的词（如「的」「条款」），它们只会带来噪声
+    fulltext_max_df_ratio: float = 0.5
+    df_cache_seconds: float = 600.0
+
+
 class RagSettings(BaseModel):
     data_dir: Path = DEFAULT_DATA_DIR
 
@@ -48,6 +62,14 @@ class RagSettings(BaseModel):
     embedding_model: str = "text-embedding-v4"
     embedding_dim: int = 1024  # 改动需要同步修改迁移里的 vector(1024)
     embedding_batch_size: int = 10  # DashScope 单次最多 10 条
+
+    # 重排（DashScope 原生接口，不在 OpenAI 兼容模式下）
+    dashscope_native_url: str = "https://dashscope.aliyuncs.com/api/v1"
+    rerank_model: str = "qwen3-rerank"  # M3 评测选定（spec D33）
+    # 评测集生成用的对话模型（只在离线评测脚本里用）
+    eval_llm_model: str = "qwen-plus"
+
+    retrieval: RetrievalSettings = RetrievalSettings()
 
     # 切分参数（字符数）
     parent_max_chars: int = 2500

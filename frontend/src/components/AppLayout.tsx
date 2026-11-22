@@ -10,11 +10,14 @@ const NAV_ITEMS = [
   { key: '/products', label: <Link to="/products">保险产品</Link> },
   // 后续里程碑加入：顾问对话、我的画像
 ]
-const ADMIN_ITEMS = [{ key: '/admin', label: <Link to="/admin/documents">条款管理</Link> }]
+const ADMIN_ITEMS = [
+  { key: '/admin/documents', label: <Link to="/admin/documents">条款管理</Link> },
+  { key: '/admin/search', label: <Link to="/admin/search">检索调试</Link> },
+  { key: '/admin/evals', label: <Link to="/admin/evals">评测记录</Link> },
+]
 
 function selectedNav(pathname: string): string {
   if (pathname.startsWith('/products')) return '/products'
-  if (pathname.startsWith('/admin')) return '/admin'
   return pathname
 }
 

@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings, get_settings
 from app.core.security import InvalidTokenError, decode_access_token
 from app.models import User, UserRole
+from app.rag.retriever import Retriever
 
 
 async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
@@ -64,3 +65,17 @@ async def get_admin_user(user: CurrentUser) -> User:
 
 
 AdminUser = Annotated[User, Depends(get_admin_user)]
+
+
+def get_retriever(request: Request) -> Retriever:
+    # 应用启动时按配置创建（见 app.main）；未配置 DashScope 时为 None
+    retriever: Retriever | None = getattr(request.app.state, "retriever", None)
+    if retriever is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="检索未配置：缺少 RAG__DASHSCOPE_API_KEY",
+        )
+    return retriever
+
+
+RetrieverDep = Annotated[Retriever, Depends(get_retriever)]

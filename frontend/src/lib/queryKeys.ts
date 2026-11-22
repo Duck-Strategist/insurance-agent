@@ -11,4 +11,7 @@ export const queryKeys = {
   adminDocuments: [USER_SCOPE, 'admin', 'documents'] as const,
   adminParents: (id: number, page: number) =>
     [USER_SCOPE, 'admin', 'documents', id, 'parents', page] as const,
+  adminSearch: (query: string, mode: string, docId: number | undefined) =>
+    [USER_SCOPE, 'admin', 'search', query, mode, docId ?? 'all'] as const,
+  adminEvalRuns: (suite: string) => [USER_SCOPE, 'admin', 'eval-runs', suite] as const,
 }

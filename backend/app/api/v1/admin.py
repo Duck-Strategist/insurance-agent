@@ -1,4 +1,4 @@
-"""管理后台：条款文档的上传、入库状态与重新入库。
+"""管理后台：条款文档的上传、入库状态与重新入库；检索调试与评测记录。
 
 入库在 FastAPI BackgroundTasks 中执行（同进程、响应返回后开始）。对演示项目足够；
 多实例部署时需要换成任务队列，且 processing 状态要放到数据库或 Redis 里。
@@ -20,12 +20,16 @@ from fastapi import (
     status,
 )
 
-from app.api.deps import AdminUser, SessionDep, SettingsDep
+from app.api.deps import AdminUser, RetrieverDep, SessionDep, SettingsDep
 from app.core.config import RagSettings
 from app.core.logging import get_logger
+from app.rag.embedder import EmbeddingError
 from app.rag.factory import RagNotConfiguredError, check_configured, ingestion_pipeline
+from app.rag.reranker import RerankError
 from app.schemas.document import DocumentOut, ParentPage
+from app.schemas.retrieval import EvalRunOut, SearchHitOut, SearchRequest, SearchResponse
 from app.services.document_service import DocumentService
+from app.services.eval_service import EvalService
 
 logger = get_logger(__name__)
 
@@ -151,3 +155,45 @@ async def list_parents(
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="文档不存在")
     items, total = await service.list_parents(doc_id, limit, offset)
     return ParentPage(items=items, total=total, offset=offset, limit=limit)
+
+
+@router.post("/search", summary="检索调试：查看三种检索配置的结果与耗时")
+async def search(_: AdminUser, body: SearchRequest, retriever: RetrieverDep) -> SearchResponse:
+    try:
+        result = await retriever.search(
+            body.query,
+            mode=body.mode,
+            document_ids=[body.document_id] if body.document_id is not None else None,
+        )
+    except (EmbeddingError, RerankError) as exc:
+        # 外部服务故障（含 Key 失效）：返回 502，让前端提示，而不是 500
+        logger.warning("admin.search_failed", error=str(exc))
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY, detail=f"检索服务调用失败：{exc}"
+        ) from None
+    return SearchResponse(
+        hits=[
+            SearchHitOut(
+                parent_id=h.parent_id,
+                child_id=h.child_id,
+                document_id=h.document_id,
+                doc_title=h.doc_title,
+                section_path=h.section_path,
+                snippet=h.snippet,
+                parent_content=h.parent_content,
+                score=h.score,
+            )
+            for h in result.hits
+        ],
+        timings=result.timings,
+    )
+
+
+@router.get("/eval-runs", summary="评测运行记录（不含逐题结果）")
+async def list_eval_runs(
+    _: AdminUser,
+    session: SessionDep,
+    suite: Annotated[str | None, Query(max_length=32)] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> list[EvalRunOut]:
+    return await EvalService(session).list_runs(suite, limit)

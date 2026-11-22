@@ -88,3 +88,55 @@ export interface Page<T> {
   page: number
   page_size: number
 }
+
+export type SearchMode = 'vector' | 'hybrid' | 'hybrid_rerank'
+
+export const SEARCH_MODE_LABELS: Record<SearchMode, string> = {
+  vector: '纯向量',
+  hybrid: '混合（向量 + 全文）',
+  hybrid_rerank: '混合 + 重排',
+}
+
+export interface SearchHit {
+  parent_id: number
+  child_id: number
+  document_id: number
+  doc_title: string
+  section_path: string[]
+  /** 命中的子块原文 */
+  snippet: string
+  /** 父块（章节）原文，作为回答上下文 */
+  parent_content: string
+  score: number
+}
+
+export interface SearchResponse {
+  hits: SearchHit[]
+  /** 各阶段耗时（毫秒）：embed_ms / recall_ms / rerank_ms / total_ms */
+  timings: Record<string, number>
+}
+
+export interface LatencyStat {
+  p50?: number
+  p95?: number
+}
+
+export interface RetrievalMetrics {
+  n: number
+  'recall@1': number
+  'recall@3': number
+  'recall@5': number
+  'recall@10': number
+  'mrr@10': number
+  latency_ms: { total: LatencyStat; embed: LatencyStat; recall: LatencyStat; rerank: LatencyStat }
+}
+
+export interface EvalRun {
+  id: number
+  suite: string
+  dataset: string
+  dataset_hash: string
+  config: Record<string, unknown>
+  metrics: Partial<RetrievalMetrics> & Record<string, unknown>
+  created_at: string
+}

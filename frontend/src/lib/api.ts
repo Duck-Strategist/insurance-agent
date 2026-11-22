@@ -3,10 +3,13 @@
 import { useAuthStore } from '../stores/auth'
 import type {
   ClauseDocument,
+  EvalRun,
   Page,
   ParentPage,
   Product,
   ProductCategory,
+  SearchMode,
+  SearchResponse,
   TokenResponse,
   User,
 } from './types'
@@ -115,4 +118,11 @@ export const adminApi = {
   },
   parents: (id: number, offset: number, limit: number) =>
     request<ParentPage>(`/api/v1/admin/documents/${id}/parents?offset=${offset}&limit=${limit}`),
+  search: (body: { query: string; mode: SearchMode; document_id?: number }) =>
+    request<SearchResponse>('/api/v1/admin/search', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  evalRuns: (suite?: string) =>
+    request<EvalRun[]>(`/api/v1/admin/eval-runs${suite ? `?suite=${encodeURIComponent(suite)}` : ''}`),
 }

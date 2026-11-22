@@ -2,7 +2,7 @@ import re
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 
 import structlog
 from fastapi import FastAPI, Request, Response
@@ -14,6 +14,7 @@ from app.api.v1 import api_router
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging, get_logger
 from app.infra.db import Database
+from app.rag.factory import RagNotConfiguredError, check_configured, retriever
 
 logger = get_logger(__name__)
 
@@ -34,12 +35,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.db = Database(settings.db)
-        logger.info("app.startup", env=settings.app.env)
-        try:
-            yield
-        finally:
-            await app.state.db.dispose()
-            logger.info("app.shutdown")
+        async with AsyncExitStack() as stack:
+            # 检索器持有向量化/重排的 HTTP 连接池，整个进程共用一个；未配置 Key 时为 None
+            app.state.retriever = None
+            try:
+                check_configured(settings.rag, need_parser=False)
+            except RagNotConfiguredError as exc:
+                logger.warning("app.retriever_disabled", reason=str(exc))
+            else:
+                app.state.retriever = await stack.enter_async_context(
+                    retriever(settings.rag, app.state.db.session_factory)
+                )
+            logger.info("app.startup", env=settings.app.env)
+            try:
+                yield
+            finally:
+                await app.state.db.dispose()
+                logger.info("app.shutdown")
 
     app = FastAPI(title=settings.app.name, debug=settings.app.debug, lifespan=lifespan)
 
