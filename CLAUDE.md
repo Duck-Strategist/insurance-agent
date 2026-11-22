@@ -2,7 +2,7 @@
 
 安心保 · 智能保险顾问：RAG + LangGraph 的保险顾问 Agent（学习 + 面试作品项目）。
 
-- 设计与决策：[docs/SPEC.md](docs/SPEC.md)（决策 D1–D39、里程碑 M0–M9、风险 Q1–Q17）。做设计取舍前先查，取舍定了就补一条决策。
+- 设计与决策：[docs/SPEC.md](docs/SPEC.md)（决策 D1–D40、里程碑 M0–M9、风险 Q1–Q17）。做设计取舍前先查，取舍定了就补一条决策。
 - 面试故事集：[docs/INTERVIEW.md](docs/INTERVIEW.md)。每个里程碑结束后补充（见「工作流程」）。
 - 参考实现 `../hm-insurance/` 是教学项目，只读对照，不复制代码，它的 `.env` 里有泄露过的密钥，不要使用。
 
@@ -76,7 +76,7 @@ npm run lint ; npx tsc -b ; npm run test ; npm run build
 - 子块向量文本带前缀「条款名｜章节路径」；查询时的分词必须和入库共用 `app.rag.tokenizer.tokenize`。送去重排的文本也带同样的前缀。
 - 检索参数（k、召回条数、权重）只在 `RetrievalSettings` 里改，不接受 LLM 传入。条款过滤：`document_ids=None` 表示不限，空列表表示没有可查的条款（返回空，不能退化成不限）。
 - 改了结构规则、切分或检索参数后重跑 `python -m app.eval retrieval`，和 `eval/README.md` 里的基线对比；简历和文档里的数字必须能在 `eval_runs` 里找到对应记录。
-- 评测集 `data/eval/*.jsonl` 改动后数据集哈希会变，新旧结果不能直接比；手写题的标准章节路径从库里复制，跑评测时会校验路径存在。
+- 评测集 `data/eval/*.jsonl` 改动后数据集哈希会变，新旧结果不能直接比；手写题的标准章节路径从库里复制，跑评测时会校验路径存在，生成题还会校验原文依据仍在标准章节里（D40）。改了结构规则重新入库后，按依据重新标注生成题的 `gold`，不要只按路径改。
 
 ## Agent 约定
 

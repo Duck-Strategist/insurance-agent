@@ -27,6 +27,7 @@ from app.eval import dataset as ds
 from app.eval.generate import (
     GenerationAuthError,
     QuestionGenerator,
+    evidence_in_section,
     generate_items,
     load_sections,
     sample_evenly,
@@ -141,6 +142,20 @@ async def cmd_retrieval(
         ]
         if unknown:
             print("以下标准章节在库里不存在：\n  " + "\n  ".join(unknown), file=sys.stderr)
+            return 2
+        # 路径还在、但原文已经挪到别的章节（结构规则改动后常见，spec Q13）：生成题按 evidence 核对
+        stale = [
+            i.id
+            for _, items, _ in loaded
+            for i in items
+            if i.evidence
+            and not any(evidence_in_section(i.evidence, sections[k]) for k in i.gold_keys())
+        ]
+        if stale:
+            print(
+                "以下题目的原文依据已不在标准章节里，请重新标注：" + "、".join(stale),
+                file=sys.stderr,
+            )
             return 2
         async with retriever(rag, db.session_factory) as r:
             names = await product_names_by_file(db.session_factory) if rewrite else {}

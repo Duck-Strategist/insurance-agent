@@ -387,3 +387,247 @@ def test_leftover_toc_entries_after_marker_are_dropped() -> None:
     assert not any("12.22 情形复杂" in p for p in paths_)
     definition = next(s for s in result.sections if "“您”指投保人" in s.text)
     assert definition.path == ["中国太平洋人寿保险股份有限公司"]
+
+
+# ---- 2026-11 结构修复（spec Q12、Q13）：用例取自真实解析结果 ----
+
+
+def joined_paths(md: str) -> list[str]:
+    return [" > ".join(s.path) for s in build_sections(md).sections]
+
+
+def body_of(md: str, path: str) -> str:
+    return next(s.text for s in build_sections(md).sections if " > ".join(s.path) == path)
+
+
+# 复星联合医联有盟：附表里 22 字的病种名（原规则只认 ≤20 字，整段正文挂到了上一个病种下）
+APPENDIX_LONG_NAME = """
+# 复星联合医联有盟重大疾病保险（互联网）条款
+
+## 附表一 重大疾病
+
+## 侵蚀性葡萄胎（或称恶性葡萄胎）
+
+指异常增生的绒毛组织浸润性生长侵入子宫肌层或转移至其他器官或组织的葡萄胎，并已经进行化疗或手术治疗。
+
+## 器官移植导致的人类免疫缺陷病毒（HIV）感染
+
+指因进行器官移植而感染上人类免疫缺陷病毒（HIV），须满足下列全部条件：
+
+## 复星联合医联有盟重大疾病保险（互联网）条款
+
+（3） 提供器官移植治疗的器官移植中心或医院必须拥有合法经营执照。
+"""
+
+
+def test_long_disease_name_in_appendix_is_heading() -> None:
+    assert joined_paths(APPENDIX_LONG_NAME) == [
+        "附表一 重大疾病 > 侵蚀性葡萄胎（或称恶性葡萄胎）",
+        "附表一 重大疾病 > 器官移植导致的人类免疫缺陷病毒（HIV）感染",
+    ]
+    hiv = "附表一 重大疾病 > 器官移植导致的人类免疫缺陷病毒（HIV）感染"
+    # 附表里再次出现的条款名不是病种名，按正文留在上一节
+    assert "复星联合医联有盟重大疾病保险（互联网）条款" in body_of(APPENDIX_LONG_NAME, hiv)
+    葡萄胎 = body_of(APPENDIX_LONG_NAME, "附表一 重大疾病 > 侵蚀性葡萄胎（或称恶性葡萄胎）")
+    assert "器官移植" not in 葡萄胎
+
+
+def test_long_unnumbered_line_outside_appendix_is_still_body() -> None:
+    # 只在附表/释义里放宽：正文里 22 字的 # 行仍按被误标的半句话处理
+    md = """
+## 第一条 保险责任
+
+## 器官移植导致的人类免疫缺陷病毒（HIV）感染
+
+正文。
+"""
+    assert joined_paths(md) == ["第一条 保险责任"]
+
+
+# 信美星辰守护：8.1.100 以后的病种（编号末级 3 位）与 1.5.1.12 这类 4 级编号
+DEEP_NUMBERS = """
+## 1.5 保险责任
+
+## 1.5.1 基本责任
+
+## 1.5.1.12 卵圆孔未闭关爱保险金
+
+卵圆孔未闭关爱保险金的给付以一次为限。
+
+## 1.5.1.13 严重肥胖手术关爱保险金
+
+被保险人于等待期后经医院的专科医生初次确诊。
+
+## 8.1 重度疾病
+
+## 8.1.93 肝豆状核变性
+
+指由于铜代谢障碍所引起的一种疾病。
+
+## 8.1.102 严重席汉氏综合征
+
+指因产后大出血并发休克。
+
+## 8.1.103 败血症导致的多器官功能障碍综合征
+
+指败血症导致的多器官功能障碍。
+"""
+
+
+def test_four_level_and_three_digit_decimal_headings() -> None:
+    assert joined_paths(DEEP_NUMBERS) == [
+        "1.5 保险责任 > 1.5.1 基本责任 > 1.5.1.12 卵圆孔未闭关爱保险金",
+        "1.5 保险责任 > 1.5.1 基本责任 > 1.5.1.13 严重肥胖手术关爱保险金",
+        "8.1 重度疾病 > 8.1.93 肝豆状核变性",
+        # 曾经挂在 8.1.93 下面：8.1.102 只认出了 "8.1.10" 前缀
+        "8.1 重度疾病 > 8.1.102 严重席汉氏综合征",
+        "8.1 重度疾病 > 8.1.103 败血症导致的多器官功能障碍综合征",
+    ]
+
+
+def test_inline_heading_with_three_digit_number_is_split() -> None:
+    md = """
+## 8.1 重度疾病
+
+8.1.106 脑型疟疾 指恶性疟原虫严重感染导致的脑病或脑型疟疾，以昏迷为主要特征。
+"""
+    assert joined_paths(md) == ["8.1 重度疾病 > 8.1.106 脑型疟疾"]
+
+
+TOC_ROWS = "<tr><td>9.31 组织病理学检查</td><td>9.37 肌力</td></tr></table>"
+DISEASE_ROWS = (
+    "<tr><td>1.1 严重脑损伤</td><td>指因头部遭受机械性外力。须满足下列条件。</td></tr>"
+    "<tr><td>1.2 瘫痪</td><td>指因疾病或意外导致肢体机能丧失。</td></tr></table>"
+)
+
+# 信美、复星：标题前的图标字体字符（U+F043）与 <sub> 标签，导致「条款目录」认不出
+ICON_HEADINGS = """
+# 复星联合医联有盟重大疾病保险（互联网）条款
+
+## \uf043<sub>拥有的重要权益</sub>
+
+✿ 在犹豫期内您若要求解除合同，我们向您无息退还保险费
+
+## \uf043 条款目录
+
+{toc_table}
+
+# 信美人寿相互保险社
+
+## 1.1 基本保险金额
+
+本合同的基本保险金额由您在投保时与我们约定。
+""".format(
+    toc_table="<table><tr><td>9.29 复利</td><td>9.35 甲状腺癌的 TNM 分期</td></tr>"
+    "<tr><td>9.30 有效身份证件</td><td>9.36 肢体</td></tr>" + TOC_ROWS
+)
+
+
+def test_icon_glyph_and_sub_tags_are_removed_from_headings_and_toc_table_dropped() -> None:
+    result = build_sections(ICON_HEADINGS)
+    assert [" > ".join(s.path) for s in result.sections] == ["拥有的重要权益", "1.1 基本保险金额"]
+    # 目录被识别成表格的部分随「条款目录」一起删掉，没有并进上一节
+    assert "9.29 复利" not in result.sections[0].text
+    assert "犹豫期" in result.sections[0].text
+
+
+def test_real_table_after_toc_marker_is_kept() -> None:
+    md = """
+## 条款目录
+
+{table}
+
+## 1.1 基本保险金额
+
+正文。
+""".format(table="<table><tr><td>病种</td><td>定义</td></tr>" + DISEASE_ROWS)
+    # 单元格里是句子的表格不是目录，不能跟着「条款目录」被删
+    assert "严重脑损伤" in build_sections(md).sections[0].text
+
+
+# 众安尊享e生：保险责任里先出现「（一）」，释义里才出现「一、」。按全文首次出现顺序，
+# 「一、」比「（一）」深，释义条目「三十、特定疾病」挂到了「（一百）皮质基底节变性」下面（spec Q12）
+PART_RESET = """
+## 第二部分 保障内容
+
+## 第六条 保险责任
+
+## （一）一般医疗保险金
+
+在保险期间内，被保险人在医院接受治疗的，保险人负责赔偿。
+
+## 第七部分 释义
+
+## 二十九、重大疾病
+
+指被保险人初次确诊下列疾病：
+
+## （一）恶性肿瘤——重度
+
+指恶性细胞不受控制的进行性增长和扩散。
+
+## （一百）皮质基底节变性
+
+指一种慢性进展性神经变性疾病。
+
+## 三十、特定疾病
+
+指下列疾病。
+
+## 八十四、语言能力完全丧失，或严重咀嚼吞咽功能障碍
+
+指语言能力完全丧失。
+"""
+
+
+def test_numbering_levels_restart_in_each_part() -> None:
+    assert joined_paths(PART_RESET) == [
+        "第二部分 保障内容 > 第六条 保险责任 > （一）一般医疗保险金",
+        "第七部分 释义 > 二十九、重大疾病",
+        "第七部分 释义 > 二十九、重大疾病 > （一）恶性肿瘤——重度",
+        "第七部分 释义 > 二十九、重大疾病 > （一百）皮质基底节变性",
+        "第七部分 释义 > 三十、特定疾病",
+        "第七部分 释义 > 八十四、语言能力完全丧失，或严重咀嚼吞咽功能障碍",
+    ]
+
+
+def test_unmarked_inline_four_level_heading_is_split_and_nested() -> None:
+    # 信美双栏排版：4 级编号的责任名和正文挤在一行、没有 # 标记。
+    # 以前不认 4 级编号，这些责任全部并进了「1.5 保险责任」（3215 字）
+    md = """
+## 1.5 保险责任
+
+## 1.5.1 基本责任
+
+1.5.1.1 首次重度疾病 被保险人经医院的专科医生初次确诊因意外伤害导致患有本合同所定义的重度疾病。
+
+1.5.1.2 中度疾病保险 被保险人经医院的专科医生初次确诊患有本合同所定义的中度疾病。
+"""
+    assert joined_paths(md) == [
+        "1.5 保险责任 > 1.5.1 基本责任 > 1.5.1.1 首次重度疾病",
+        "1.5 保险责任 > 1.5.1 基本责任 > 1.5.1.2 中度疾病保险",
+    ]
+
+
+def test_bare_decimal_number_is_still_a_heading() -> None:
+    # 达尔文 12 号：MinerU 把「2.3.3.4 “恶性肿瘤——重度”治疗津贴保险金」的标题文字弄丢了，只剩编号。
+    # 不认的话，下面的（1）（2）（3）会挂到上一个条目「2.3.3.3 ……」下
+    md = """
+## 2.3.3 可选责任
+
+## 2.3.3.3 重大疾病多次给付保险金
+
+## （1）第二次重大疾病保险金
+
+正文一。
+
+## 2.3.3.4
+
+## （1）首次治疗津贴保险金
+
+正文二。
+"""
+    assert joined_paths(md) == [
+        "2.3.3 可选责任 > 2.3.3.3 重大疾病多次给付保险金 > （1）第二次重大疾病保险金",
+        "2.3.3 可选责任 > 2.3.3.4 > （1）首次治疗津贴保险金",
+    ]

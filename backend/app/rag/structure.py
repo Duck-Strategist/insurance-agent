@@ -32,18 +32,27 @@ HEADING_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("cn_paren", re.compile(rf"^[（(][{CN_NUM}]+[)）]")),
     ("cn_dun", re.compile(rf"^[{CN_NUM}]+、")),  # 一、二、
     ("num_paren", re.compile(r"^[（(]\d{1,2}[)）]")),  # （1）（2）
-    ("dec3", re.compile(r"^\d{1,2}\.\d{1,2}\.\d{1,2}(?!\d)\.?(?=[\s　]|[^\d.])")),
-    ("dec2", re.compile(r"^\d{1,2}\.\d{1,2}(?![\d.])(?=[\s　]|[^\d])")),
+    # 末级编号允许 3 位：信美的重度疾病编到 8.1.117（曾因只认 2 位，8.1.100 以后的病种全部识别不出）
+    ("dec4", re.compile(r"^\d{1,2}\.\d{1,2}\.\d{1,2}\.\d{1,3}(?!\d)\.?(?=[\s　]|[^\d.]|$)")),
+    ("dec3", re.compile(r"^\d{1,2}\.\d{1,2}\.\d{1,3}(?!\d)\.?(?=[\s　]|[^\d.]|$)")),
+    # 末尾的 |$：MinerU 有时只留下编号、标题文字丢了（达尔文 12 号的「## 2.3.3.4」），
+    # 仍要当作该级标题，否则它下面的（1）（2）（3）会挂到上一个条目下
+    ("dec2", re.compile(r"^\d{1,2}\.\d{1,3}(?![\d.])(?=[\s　]|[^\d]|$)")),
     ("dec1", re.compile(r"^\d{1,2}[\.．、](?![\d])")),
 ]
 # "1 合同订立"（数字后无点）只在 MinerU 标了 # 时才认作标题，否则容易误伤正文里的数字开头
 DEC1_NO_DOT = re.compile(r"^\d{1,2}\s+[^\d\s.．]")
 # 数字编号的天然层级：1. < 1.1 < 1.1.1，无论首次出现顺序如何都保持这个相对关系
-DECIMAL_ORDER = ["dec1", "dec2", "dec3"]
+DECIMAL_ORDER = ["dec1", "dec2", "dec3", "dec4"]
 
 MAX_HEADING_CHARS = 40  # 超过这个长度的编号行视为正文里的列表项，而不是标题
 MAX_MARKED_HEADING_CHARS = 60  # MinerU 标了 # 的行放宽一些
 MAX_UNNUMBERED_HEADING_CHARS = 20  # 没编号的 # 行：超过就是被误标的半句话
+# 附表、释义里的病种名可能更长（「器官移植导致的人类免疫缺陷病毒（HIV）感染」22 字）。
+# 只在这些部分放宽：正文里长的 # 行多是被误标的半句话，附表里则基本是病种名
+MAX_APPENDIX_HEADING_CHARS = 30
+# 条款名在附表前后会再出现一次（「复星联合医联有盟重大疾病保险（互联网）条款」），不是病种名
+CLAUSE_TITLE = re.compile(r"(条款|（分红型）)$")
 MAX_LEVEL = 8
 SENTENCE_END = ("。", "；", ";", "：", ":", "，", ",")
 CLAUSE_PUNCT = re.compile(r"[，,。；;：:]")
@@ -61,7 +70,7 @@ TOC_MARKER = re.compile(r"^(条款)?目\s*录$")
 NUMBER_TOKEN = re.compile(r"(?:^|\s)\d{1,2}(?:[.．]\d{1,2}){0,2}[.．]?\s+\S")
 # 双栏合并行：编号 + 短标题（无标点） + 空格 + 正文
 INLINE_HEADING = re.compile(
-    r"^(?P<head>(?:\d{1,2}\.\d{1,2}(?:\.\d{1,2})?|第[" + CN_NUM + r"\d]+条)\s*"
+    r"^(?P<head>(?:\d{1,2}\.\d{1,2}(?:\.\d{1,3}){0,2}|第[" + CN_NUM + r"\d]+条)\s*"
     r"[^\s，,。；;：:“”\"]{2,14})\s+(?P<body>\S.*)$"
 )
 # 注意 (?!\d)：不能把 "1.1 合同构成" 当成第 1 章
@@ -70,6 +79,10 @@ FIRST_ORDINAL = re.compile(
 )
 ARABIC_CHAPTER = re.compile(r"^第\s*(\d{1,2})\s*章")
 MD_HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
+# 标题里的排版噪声：PDF 图标字体的私用区字符（如「##  条款目录」前的 U+F043 图标）、
+# MinerU 给小字号文字加的 <sub> 标签。只清理 # 标题行，正文不动（D28）。
+# 不清理的话「条款目录」认不出，整块目录留在正文里
+HEADING_NOISE = re.compile("[\ue000-\uf8ff]|</?sub>")
 
 # 一行接近 PDF 整行宽度、结尾没有句末/闭合标点，说明是被换行或分页截断的半句话
 BROKEN_LINE_MIN_CHARS = 30
@@ -125,7 +138,7 @@ def _split_lines(markdown: str) -> list[Line]:
             continue
         m = MD_HEADING.match(stripped)
         if m:
-            lines.append(Line(m.group(2).strip(), marked_heading=True))
+            lines.append(Line(HEADING_NOISE.sub("", m.group(2)).strip(), marked_heading=True))
         else:
             lines.append(Line(stripped, marked_heading=False))
     if table_buf:  # 未闭合的表格也保留
@@ -171,8 +184,12 @@ def heading_kind(line: Line) -> str | None:
     return None
 
 
-def is_unnumbered_heading(line: Line) -> bool:
-    """MinerU 标了 # 但没编号的行：短、且不含句内标点才算标题，否则是被误标的半句话。"""
+def is_unnumbered_heading(line: Line, *, in_appendix: bool = False) -> bool:
+    """MinerU 标了 # 但没编号的行：短、且不含句内标点才算标题，否则是被误标的半句话。
+
+    in_appendix：当前在附表/释义等顶层部分里，病种名可以长一些（MAX_APPENDIX_HEADING_CHARS），
+    但条款名（以「条款」结尾）除外。
+    """
     text = line.text
     if not line.marked_heading or heading_kind(line) is not None:
         return False
@@ -181,6 +198,8 @@ def is_unnumbered_heading(line: Line) -> bool:
     if TOP_LEVEL_UNNUMBERED.match(text):
         # "附表四 甲状腺癌的TNM分期采用……"这种标题后面粘了正文的，按正文处理
         return len(text) <= MAX_MARKED_HEADING_CHARS // 2
+    if in_appendix and not CLAUSE_TITLE.search(text) and _parens_balanced(text):
+        return len(text) <= MAX_APPENDIX_HEADING_CHARS
     return len(text) <= MAX_UNNUMBERED_HEADING_CHARS
 
 
@@ -217,6 +236,24 @@ def _is_prose(line: Line) -> bool:
     if line.is_table or not CLAUSE_PUNCT.search(text):
         return False
     return "。" in text or len(text) > MAX_HEADING_CHARS
+
+
+TABLE_CELL = re.compile(r"<td[^>]*>(.*?)</td>", re.S)
+TOC_ENTRY = re.compile(r"^\d{1,2}(?:\.\d{1,3}){1,3}\s*\S")
+
+
+def _is_toc_table(line: Line) -> bool:
+    """目录被 MinerU 识别成表格（信美：「9.29 复利」「9.30 有效身份证件」……）。
+
+    判定：非空单元格里至少 70% 是「编号 + 短标题」，且没有句号。正文里的表格
+    （费率表、疾病定义表）单元格是数字或句子，不会满足。
+    """
+    if not line.is_table or "。" in line.text:
+        return False
+    cells = [c.strip() for c in TABLE_CELL.findall(line.text) if c.strip()]
+    if len(cells) < 4:
+        return False
+    return sum(1 for c in cells if TOC_ENTRY.match(c)) / len(cells) >= 0.7
 
 
 def _heading_title(text: str) -> str:
@@ -264,12 +301,14 @@ def _drop_toc_block(lines: list[Line], removed: Counter[str]) -> list[Line]:
         # 遇到 # 标题、完整句子或"第 1 章"编号（正文从这里开始）即停。
         # 不删的话它们会成为后面正文的"上级标题"
         end = marker + 1
-        while (
-            end < len(lines)
-            and not lines[end].marked_heading
-            and not _is_prose(lines[end])
-            and heading_kind(lines[end]) is not None
-            and not ordinal(lines[end])
+        while end < len(lines) and (
+            _is_toc_table(lines[end])
+            or (
+                not lines[end].marked_heading
+                and not _is_prose(lines[end])
+                and heading_kind(lines[end]) is not None
+                and not ordinal(lines[end])
+            )
         ):
             end += 1
         removed["toc"] += end - marker
@@ -323,7 +362,7 @@ def _join_broken_lines(lines: list[Line], removed: Counter[str]) -> list[Line]:
     return out
 
 
-DECIMAL_PREFIX = re.compile(r"^(\d{1,2})(?:[.．](\d{1,2}))?(?:[.．](\d{1,2}))?")
+DECIMAL_PREFIX = re.compile(r"^(\d{1,2})(?:[.．](\d{1,3}))?(?:[.．](\d{1,3}))?(?:[.．](\d{1,3}))?")
 
 
 def decimal_numbers(text: str) -> tuple[int, ...] | None:
@@ -346,6 +385,32 @@ def _assign_levels(kinds_in_order: list[str]) -> dict[str, int]:
     for pos, k in zip(dec_positions, dec_sorted, strict=True):
         seen[pos] = k
     return {k: min(i + 1, MAX_LEVEL) for i, k in enumerate(seen)}
+
+
+def _line_levels(kinds: list[str | None], levels: dict[str, int]) -> list[int | None]:
+    """每行标题的层级。
+
+    默认按全文「首次出现顺序」分配（levels）。但当最高一级是「第X部分/章」时，每个部分内部
+    重新按首次出现顺序分配：众安条款前面的保险责任里先出现「（一）」、释义里才出现「一、」，
+    按全文顺序「一、」比「（一）」深，释义里「八十四、语言能力完全丧失……」就挂到了
+    「（十三）原发性肉碱缺乏症」下面（spec Q12）。各部分的编号体系本来就各自独立。
+    """
+    if not levels or min(levels, key=lambda k: levels[k]) != "part":
+        return [levels[k] if k is not None else None for k in kinds]
+    out: list[int | None] = []
+    segment_start = 0
+
+    def assign(segment: list[str | None]) -> None:
+        inner = _assign_levels([k for k in segment if k is not None and k != "part"])
+        for k in segment:
+            out.append(None if k is None else 1 if k == "part" else inner[k] + 1)
+
+    for i, k in enumerate(kinds):
+        if k == "part" and i > segment_start:
+            assign(kinds[segment_start:i])
+            segment_start = i
+    assign(kinds[segment_start:])
+    return out
 
 
 def build_sections(markdown: str, *, title_hint: str | None = None) -> StructureResult:
@@ -376,6 +441,7 @@ def build_sections(markdown: str, *, title_hint: str | None = None) -> Structure
         removed["dec1_as_list_item"] += kinds.count("dec1")
         kinds = [None if k == "dec1" else k for k in kinds]
     levels = _assign_levels([k for k in kinds if k is not None])
+    line_levels = _line_levels(kinds, levels)
 
     sections: list[Section] = []
     # 栈里记录 (层级, 标题)。入栈时弹出所有层级 >= 当前层级的标题：
@@ -385,17 +451,22 @@ def build_sections(markdown: str, *, title_hint: str | None = None) -> Structure
     stack: list[tuple[int, str, tuple[int, ...] | None]] = []
     # 最近一个编号标题（或附表类顶层标题）的层级；没编号的标题挂在它下面一级
     anchor_level = 0
+    # 当前是否在附表、释义这类没编号的顶层部分里（其中的病种名可以长一些）
+    in_appendix = False
     current = Section(path=[])
     heading_counts: Counter[str] = Counter()
 
-    for ln, kind in zip(lines, kinds, strict=True):
+    for ln, kind, line_level in zip(lines, kinds, line_levels, strict=True):
         level: int | None = None
         if kind is not None:
-            level = levels[kind]
-            anchor_level = level
-        elif is_unnumbered_heading(ln):
+            level = line_level
+            anchor_level = level or 0
+            if level == 1:
+                in_appendix = False
+        elif is_unnumbered_heading(ln, in_appendix=in_appendix):
             if TOP_LEVEL_UNNUMBERED.match(ln.text):
                 kind, level, anchor_level = "appendix", 1, 1
+                in_appendix = not ln.text.startswith(("阅读指引", "条款目录", "目"))
             else:
                 # 如附表里的疾病名"恶性肿瘤——重度"：同一锚点下的多个互为兄弟
                 kind, level = "unnumbered", anchor_level + 1
