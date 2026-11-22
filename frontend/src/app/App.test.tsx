@@ -1,17 +1,6 @@
-import { render, screen } from '@testing-library/react'
-import { createMemoryRouter, RouterProvider } from 'react-router'
+import { screen } from '@testing-library/react'
 
-import { Providers } from './Providers'
-import { routes } from './routes'
-
-function renderAt(path: string) {
-  const router = createMemoryRouter(routes, { initialEntries: [path] })
-  return render(
-    <Providers>
-      <RouterProvider router={router} />
-    </Providers>,
-  )
-}
+import { renderAt } from '../test/utils'
 
 afterEach(() => {
   vi.unstubAllGlobals()

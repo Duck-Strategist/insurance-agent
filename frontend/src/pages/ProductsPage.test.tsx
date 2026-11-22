@@ -58,8 +58,7 @@ test('页码越界时自动跳到最后一页', async () => {
   mockFetch({ '/health': healthOk, '/api/v1/products': productsHandler })
   const { router } = renderAt('/products?category=life&page=9')
   // 寿险只有 2 个，只有 1 页 → 去掉 page 参数，显示产品而不是"暂无产品"
-  // 先请求越界页、再跳转重新请求：两次往返，并行跑全部测试时默认的 1 秒不够
-  expect(await screen.findByText('寿险乙', undefined, { timeout: 4000 })).toBeInTheDocument()
+  expect(await screen.findByText('寿险乙')).toBeInTheDocument()
   expect(router.state.location.search).toBe('?category=life')
   expect(screen.queryByText('暂无产品')).not.toBeInTheDocument()
 })
