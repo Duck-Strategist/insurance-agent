@@ -49,8 +49,14 @@ export interface DocumentStats {
 export interface ClauseDocument {
   id: number
   file_name: string
+  /** 最近一次操作的结果 */
   status: DocumentStatus
+  /** 后台正在入库（服务进程内） */
   processing: boolean
+  /** 库里有可检索的块（可能是旧版本） */
+  searchable: boolean
+  /** 库里的块来自旧版本文件，新版本尚未成功入库 */
+  stale: boolean
   error: string | null
   parent_count: number
   child_count: number
@@ -67,6 +73,13 @@ export interface ParentPreview {
   chars: number
   child_count: number
   preview: string
+}
+
+export interface ParentPage {
+  items: ParentPreview[]
+  total: number
+  offset: number
+  limit: number
 }
 
 export interface Page<T> {

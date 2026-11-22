@@ -1,5 +1,5 @@
 import { ReloadOutlined, UploadOutlined } from '@ant-design/icons'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Alert,
   App,
@@ -13,6 +13,7 @@ import {
   Upload,
   type TableColumnsType,
 } from 'antd'
+import { useState } from 'react'
 
 import { adminApi } from '../lib/api'
 import { queryKeys } from '../lib/queryKeys'
@@ -34,6 +35,7 @@ const REMOVED_LABELS: Record<string, string> = {
   joined_broken_lines: '接断行',
   split_inline_headings: '拆双栏',
   inconsistent_parent_dropped: '修正父级',
+  dec1_as_list_item: '列表项',
 }
 
 // 编号类型 → 示例写法
@@ -48,14 +50,56 @@ const HEADING_LABELS: Record<string, string> = {
   dec3: '1.1.1',
 }
 
-function isBusy(d: ClauseDocument) {
-  return d.processing || d.status === 'pending' || d.status === 'parsed'
+const PARENTS_PAGE_SIZE = 20
+
+/** 停在 pending/parsed 却不在处理中：入库被打断了（如服务重启），需要重新入库 */
+function isInterrupted(d: ClauseDocument) {
+  return !d.processing && (d.status === 'pending' || d.status === 'parsed')
+}
+
+function StatusCell({ d }: { d: ClauseDocument }) {
+  if (d.processing) return <Tag color="processing">入库中…</Tag>
+  const tags = []
+  if (isInterrupted(d)) {
+    tags.push(
+      <Tooltip key="s" title="入库过程被打断（如服务重启），请点「重新入库」">
+        <Tag color="warning">入库中断</Tag>
+      </Tooltip>,
+    )
+  } else {
+    tags.push(
+      <Tooltip key="s" title={d.error}>
+        <Tag color={STATUS[d.status].color}>{STATUS[d.status].label}</Tag>
+      </Tooltip>,
+    )
+  }
+  // 最近一次操作失败或未完成时，说明检索实际在用什么
+  if (d.status !== 'indexed') {
+    tags.push(
+      d.searchable ? (
+        <Tag key="v" color={d.stale ? 'orange' : 'blue'}>
+          {d.stale ? '检索使用旧版本' : '检索可用'}
+        </Tag>
+      ) : (
+        <Tag key="v">不可检索</Tag>
+      ),
+    )
+  }
+  return (
+    <Space size={[4, 4]} wrap>
+      {tags}
+    </Space>
+  )
 }
 
 function ParentsTable({ docId }: { docId: number }) {
+  const [page, setPage] = useState(1)
+  // 服务端分页：一份条款可能有几百个父块（众安 293 个），不能一次只取前 N 条
   const { data, isPending, isError, error } = useQuery({
-    queryKey: queryKeys.adminParents(docId),
-    queryFn: () => adminApi.parents(docId),
+    queryKey: queryKeys.adminParents(docId, page),
+    queryFn: () =>
+      adminApi.parents(docId, (page - 1) * PARENTS_PAGE_SIZE, PARENTS_PAGE_SIZE),
+    placeholderData: keepPreviousData,
   })
   if (isError) return <Alert type="error" message={error.message} />
   return (
@@ -63,8 +107,16 @@ function ParentsTable({ docId }: { docId: number }) {
       size="small"
       rowKey="id"
       loading={isPending}
-      dataSource={data}
-      pagination={{ pageSize: 20, hideOnSinglePage: true }}
+      dataSource={data?.items}
+      pagination={{
+        current: page,
+        pageSize: PARENTS_PAGE_SIZE,
+        total: data?.total ?? 0,
+        hideOnSinglePage: true,
+        showSizeChanger: false,
+        showTotal: (total) => `共 ${total} 个父块`,
+        onChange: setPage,
+      }}
       columns={[
         { title: '#', dataIndex: 'seq', width: 60 },
         {
@@ -96,8 +148,8 @@ export function AdminDocumentsPage() {
   const { data, isPending, isError, error } = useQuery({
     queryKey: queryKeys.adminDocuments,
     queryFn: adminApi.listDocuments,
-    // 有文档在入库时每 3 秒刷新一次状态
-    refetchInterval: (q) => (q.state.data?.some(isBusy) ? 3000 : false),
+    // 只在后台确实有文档在入库时轮询；停在 pending/parsed 的（入库被打断）不轮询，否则永远停不下来
+    refetchInterval: (q) => (q.state.data?.some((d) => d.processing) ? 3000 : false),
   })
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: queryKeys.adminDocuments })
@@ -140,20 +192,14 @@ export function AdminDocumentsPage() {
     {
       title: '状态',
       dataIndex: 'status',
-      width: 110,
-      render: (s: DocumentStatus, d) =>
-        d.processing ? (
-          <Tag color="processing">入库中…</Tag>
-        ) : (
-          <Tooltip title={d.error}>
-            <Tag color={STATUS[s].color}>{STATUS[s].label}</Tag>
-          </Tooltip>
-        ),
+      width: 150,
+      render: (_, d) => <StatusCell d={d} />,
     },
     {
       title: '父块 / 子块',
       width: 110,
-      render: (_, d) => (d.status === 'indexed' ? `${d.parent_count} / ${d.child_count}` : '—'),
+      // 计数描述的是库里现有的块（可能是旧版本），只要可检索就显示
+      render: (_, d) => (d.searchable ? `${d.parent_count} / ${d.child_count}` : '—'),
     },
     {
       title: '标题识别',
@@ -240,7 +286,7 @@ export function AdminDocumentsPage() {
           scroll={{ x: 960 }}
           expandable={{
             expandedRowRender: (d) => <ParentsTable docId={d.id} />,
-            rowExpandable: (d) => d.status === 'indexed',
+            rowExpandable: (d) => d.searchable,
           }}
           locale={{ emptyText: '还没有条款，上传 PDF 或在后端执行 python -m app.rag ingest --all' }}
         />

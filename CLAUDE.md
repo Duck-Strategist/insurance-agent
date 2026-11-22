@@ -65,6 +65,8 @@ npm run lint ; npx tsc -b ; npm run test ; npm run build
 - **不用 LLM 改写条款原文**（D28）。`structure.py` 只删行、拆行、接行、改标题标记。
 - 新增或修改结构规则时：先在真实解析结果上看问题（`data/parsed/<hash>/full.md`），再写规则，并把真实输出里的片段加成 `tests/test_rag_structure.py` 的回归用例。改完用 `--force` 重跑入库，在管理后台对比统计。
 - 入库写库必须在单事务内，网络调用放在事务外；同一文档写入前先锁文档行。
+- 文档可不可检索看 `documents.indexed_hash IS NOT NULL`，**不要看 `status`**（它只是最近一次操作的结果，重新入库失败时旧块仍在、仍可检索）。
+- 删除内容的规则（如删目录块）必须有"不会误删"的约束和回归测试：曾因只比较编号不比较标题，误删了 3 份条款的第 1 章标题和正文。改完规则在全部真实条款上对比删除的行。
 - 子块向量文本带前缀「条款名｜章节路径」；查询时的分词必须和入库共用 `app.rag.tokenizer.tokenize`。
 
 ## 前端约定

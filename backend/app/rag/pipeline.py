@@ -14,6 +14,7 @@ from typing import Literal
 
 import anyio.to_thread
 from sqlalchemy import delete, func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import RagSettings
@@ -131,6 +132,7 @@ class IngestionPipeline:
                 doc.stats = stats
                 doc.parent_count = len(parents)
                 doc.child_count = len(children)
+                doc.indexed_hash = file_hash
                 doc.indexed_at = datetime.now(UTC)
         except (ParseAuthError, EmbeddingAuthError) as exc:
             # 凭证错误对所有文件都一样：标记失败后向上抛出，让调用方停止批处理
@@ -148,19 +150,24 @@ class IngestionPipeline:
         return IngestResult(path.name, "indexed", len(parents), len(children))
 
     async def _register(self, file_name: str, file_hash: str) -> tuple[int, bool]:
-        """登记文档，返回 (id, 是否已是最新的 indexed 状态)。文件内容变了则重置为 pending。"""
+        """登记文档，返回 (id, 库里的块是否已是这个文件版本)。文件内容变了则重置为 pending。"""
         async with self._sessions() as session, session.begin():
-            doc = await session.scalar(select(Document).where(Document.file_name == file_name))
-            if doc is None:
-                doc = Document(file_name=file_name, file_hash=file_hash)
-                session.add(doc)
-                await session.flush()
-                return doc.id, False
-            unchanged = doc.file_hash == file_hash and doc.status == DocumentStatus.INDEXED
+            # INSERT ... ON CONFLICT DO NOTHING：两个进程同时首次登记同一文件时不会撞唯一约束
+            await session.execute(
+                pg_insert(Document)
+                .values(file_name=file_name, file_hash=file_hash)
+                .on_conflict_do_nothing(index_elements=[Document.file_name])
+            )
+            doc = await session.scalar(
+                select(Document).where(Document.file_name == file_name).with_for_update()
+            )
+            assert doc is not None
+            # 版本一致且最近一次成功才跳过；上次失败的要重试（哪怕旧块还在）
+            up_to_date = doc.indexed_hash == file_hash and doc.status == DocumentStatus.INDEXED
             if doc.file_hash != file_hash:
                 doc.file_hash = file_hash
                 doc.status = DocumentStatus.PENDING
-            return doc.id, unchanged
+            return doc.id, up_to_date
 
     async def _set_status(
         self, doc_id: int, status: DocumentStatus, *, error: str | None = None

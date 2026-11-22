@@ -13,6 +13,8 @@ const doc = (over: Partial<ClauseDocument> = {}): ClauseDocument => ({
   file_name: '众安尊享e生条款.pdf',
   status: 'indexed',
   processing: false,
+  searchable: true,
+  stale: false,
   error: null,
   parent_count: 120,
   child_count: 340,
@@ -47,7 +49,7 @@ test('管理员看到文档状态、父子块数和清洗统计', async () => {
     '/health': healthOk,
     '/api/v1/auth/me': () => jsonResponse(admin),
     '/api/v1/admin/documents': () =>
-      jsonResponse([doc(), doc({ id: 2, file_name: '失败.pdf', status: 'failed', error: 'boom', stats: {} })]),
+      jsonResponse([doc(), doc({ id: 2, file_name: '失败.pdf', status: 'failed', error: 'boom', stats: {}, searchable: false })]),
   })
   renderAt('/admin/documents')
   expect(await screen.findByText('众安尊享e生条款.pdf')).toBeInTheDocument()
@@ -84,4 +86,67 @@ test('上传用 FormData 发送，不带 JSON Content-Type', async () => {
   const headers = init!.headers as Headers
   expect(headers.has('Content-Type')).toBe(false)
   expect(headers.get('Authorization')).toBe('Bearer t')
+})
+
+test('入库被打断的文档显示“入库中断”，且不会触发轮询', async () => {
+  useAuthStore.setState({ token: 't', user: admin })
+  const fetchMock = mockFetch({
+    '/health': healthOk,
+    '/api/v1/auth/me': () => jsonResponse(admin),
+    '/api/v1/admin/documents': () =>
+      jsonResponse([doc({ status: 'parsed', processing: false, searchable: false, stats: {} })]),
+  })
+  renderAt('/admin/documents')
+  expect(await screen.findByText('入库中断')).toBeInTheDocument()
+  expect(screen.getByText('不可检索')).toBeInTheDocument()
+  const listCalls = () =>
+    fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/api/v1/admin/documents')).length
+  const before = listCalls()
+  await new Promise((r) => setTimeout(r, 3500))
+  expect(listCalls()).toBe(before)
+}, 10_000)
+
+test('重新入库失败但旧块还在时，提示检索使用旧版本', async () => {
+  useAuthStore.setState({ token: 't', user: admin })
+  mockFetch({
+    '/health': healthOk,
+    '/api/v1/auth/me': () => jsonResponse(admin),
+    '/api/v1/admin/documents': () =>
+      jsonResponse([doc({ status: 'failed', error: '限流', stale: true, stats: {} })]),
+  })
+  renderAt('/admin/documents')
+  expect(await screen.findByText('失败')).toBeInTheDocument()
+  expect(screen.getByText('检索使用旧版本')).toBeInTheDocument()
+  // 旧块仍在：计数照常显示
+  expect(screen.getByText('120 / 340')).toBeInTheDocument()
+})
+
+test('父块预览走服务端分页，能翻到 200 条以后', async () => {
+  useAuthStore.setState({ token: 't', user: admin })
+  const fetchMock = mockFetch({
+    '/health': healthOk,
+    '/api/v1/auth/me': () => jsonResponse(admin),
+    '/api/v1/admin/documents/1/parents': (url) => {
+      const offset = Number(url.searchParams.get('offset'))
+      const items = Array.from({ length: 20 }, (_, i) => ({
+        id: offset + i + 1,
+        seq: offset + i,
+        section_path: [`第${offset + i}节`],
+        chars: 10,
+        child_count: 1,
+        preview: 'x',
+      }))
+      return jsonResponse({ items, total: 293, offset, limit: 20 })
+    },
+    '/api/v1/admin/documents': () => jsonResponse([doc()]),
+  })
+  const { container } = renderAt('/admin/documents')
+  await screen.findByText('众安尊享e生条款.pdf')
+  fireEvent.click(container.querySelector('.ant-table-row-expand-icon')!)
+  expect(await screen.findByText('共 293 个父块')).toBeInTheDocument()
+
+  fireEvent.click(screen.getByRole('button', { name: '页 15' }))
+  expect(await screen.findByText('第280节')).toBeInTheDocument()
+  const urls = fetchMock.mock.calls.map(([u]) => String(u))
+  expect(urls.some((u) => u.includes('/parents?offset=280&limit=20'))).toBe(true)
 })

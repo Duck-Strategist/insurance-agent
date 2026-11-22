@@ -34,6 +34,8 @@ class DocumentService:
                 file_name=d.file_name,
                 status=d.status,
                 processing=d.file_name in processing,
+                searchable=d.searchable,
+                stale=d.stale,
                 error=d.error,
                 parent_count=d.parent_count,
                 child_count=d.child_count,
@@ -62,7 +64,9 @@ class DocumentService:
         await self.session.refresh(doc)
         return doc
 
-    async def list_parents(self, doc_id: int, limit: int, offset: int) -> list[ParentPreview]:
+    async def list_parents(
+        self, doc_id: int, limit: int, offset: int
+    ) -> tuple[list[ParentPreview], int]:
         child = aliased(Chunk)
         child_count = (
             select(func.count())
@@ -77,7 +81,12 @@ class DocumentService:
             .offset(offset)
             .limit(limit)
         )
-        return [
+        total = await self.session.scalar(
+            select(func.count()).where(
+                Chunk.document_id == doc_id, Chunk.level == ChunkLevel.PARENT
+            )
+        )
+        items = [
             ParentPreview(
                 id=c.id,
                 seq=c.seq,
@@ -88,3 +97,4 @@ class DocumentService:
             )
             for c, n in rows.all()
         ]
+        return items, total or 0

@@ -148,6 +148,8 @@ async def test_upload_saves_registers_and_schedules_ingest(
         ("notes.txt", PDF, 422),
         ("fake.pdf", b"not a pdf at all", 422),
         (".pdf", PDF, 422),
+        (".PDF", PDF, 422),  # 大写扩展名也不能当成"只有扩展名"的文件名放过
+        (".hidden.pdf", PDF, 422),
     ],
 )
 async def test_upload_validation(
@@ -224,3 +226,45 @@ async def test_reindex(
     ok = await rag_client.post(f"/api/v1/admin/documents/{doc.id}/reindex", headers=bearer(token))
     assert ok.status_code == 202
     assert recorder.ingested == [("已有.pdf", True)]
+
+
+async def test_uppercase_extension_is_accepted(
+    rag_client: AsyncClient, db_session: AsyncSession, recorder: RecordingPipeline
+) -> None:
+    token = await login_as(rag_client, db_session, "boss", admin=True)
+    resp = await rag_client.post(
+        "/api/v1/admin/documents",
+        headers=bearer(token),
+        files={"file": ("条款.PDF", PDF, "application/pdf")},
+    )
+    assert resp.status_code == 202
+    assert recorder.ingested == [("条款.PDF", True)]
+
+
+async def test_parents_endpoint_pages_on_server_with_total(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    from app.models import Chunk
+
+    doc = Document(file_name="分页.pdf", file_hash="h", status="indexed", indexed_hash="h")
+    db_session.add(doc)
+    await db_session.flush()
+    db_session.add_all(
+        Chunk(document_id=doc.id, level="parent", seq=i, section_path=[f"第{i}节"], content="x")
+        for i in range(250)
+    )
+    await db_session.flush()
+    token = await login_as(client, db_session, "boss", admin=True)
+
+    first = (
+        await client.get(
+            f"/api/v1/admin/documents/{doc.id}/parents?limit=200", headers=bearer(token)
+        )
+    ).json()
+    assert first["total"] == 250 and len(first["items"]) == 200
+    last = (
+        await client.get(
+            f"/api/v1/admin/documents/{doc.id}/parents?limit=200&offset=200", headers=bearer(token)
+        )
+    ).json()
+    assert [p["seq"] for p in last["items"]] == list(range(200, 250))

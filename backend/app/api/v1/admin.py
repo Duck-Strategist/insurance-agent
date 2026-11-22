@@ -24,7 +24,7 @@ from app.api.deps import AdminUser, SessionDep, SettingsDep
 from app.core.config import RagSettings
 from app.core.logging import get_logger
 from app.rag.factory import RagNotConfiguredError, check_configured, ingestion_pipeline
-from app.schemas.document import DocumentOut, ParentPreview
+from app.schemas.document import DocumentOut, ParentPage
 from app.services.document_service import DocumentService
 
 logger = get_logger(__name__)
@@ -115,13 +115,15 @@ async def upload_document(
     _require_rag(settings.rag)
     # 只取文件名本身，防止 ../ 之类的路径穿越
     name = PurePath(file.filename or "").name
-    if not name.lower().endswith(".pdf") or name in {".pdf", ""}:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="只支持 PDF 文件")
+    path = PurePath(name)
+    # 必须是 .pdf（不区分大小写），且文件名主体非空、不以点开头（否则会存成隐藏文件）
+    if path.suffix.lower() != ".pdf" or not path.stem.strip() or name.startswith("."):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail="只支持 PDF 文件")
     content = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(content) > MAX_UPLOAD_BYTES:
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="文件超过 30MB")
     if not content.startswith(b"%PDF-"):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="文件内容不是 PDF")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail="文件内容不是 PDF")
     if name in _processing(request):
         raise HTTPException(status.HTTP_409_CONFLICT, detail="该文档正在入库，请稍后")
 
@@ -143,8 +145,9 @@ async def list_parents(
     session: SessionDep,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
-) -> list[ParentPreview]:
+) -> ParentPage:
     service = DocumentService(session)
     if await service.get(doc_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="文档不存在")
-    return await service.list_parents(doc_id, limit, offset)
+    items, total = await service.list_parents(doc_id, limit, offset)
+    return ParentPage(items=items, total=total, offset=offset, limit=limit)

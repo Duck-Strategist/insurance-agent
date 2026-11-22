@@ -26,8 +26,9 @@ CN_NUM = "一二三四五六七八九十百零〇两"
 
 # (编号类型, 正则)。顺序决定同一行同时匹配多个时的优先级：更具体的在前
 HEADING_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    ("part", re.compile(rf"^第[{CN_NUM}\d]+(部分|章)(?=[\s　]|$)")),
-    ("article", re.compile(rf"^第[{CN_NUM}\d]+条(?=[\s　]|$)")),
+    # 允许"第 1章""第 3 章"这类带空格、阿拉伯数字的写法
+    ("part", re.compile(rf"^第\s*[{CN_NUM}\d]+\s*(部分|章)(?=[\s　]|$)")),
+    ("article", re.compile(rf"^第\s*[{CN_NUM}\d]+\s*条(?=[\s　]|$)")),
     ("cn_paren", re.compile(rf"^[（(][{CN_NUM}]+[)）]")),
     ("cn_dun", re.compile(rf"^[{CN_NUM}]+、")),  # 一、二、
     ("num_paren", re.compile(r"^[（(]\d{1,2}[)）]")),  # （1）（2）
@@ -63,7 +64,11 @@ INLINE_HEADING = re.compile(
     r"^(?P<head>(?:\d{1,2}\.\d{1,2}(?:\.\d{1,2})?|第[" + CN_NUM + r"\d]+条)\s*"
     r"[^\s，,。；;：:“”\"]{2,14})\s+(?P<body>\S.*)$"
 )
-FIRST_ORDINAL = re.compile(r"^(?:(?P<dec>1)(?:[.．、]|\s)|(?P<cn>第一(?:部分|章|条)))")
+# 注意 (?!\d)：不能把 "1.1 合同构成" 当成第 1 章
+FIRST_ORDINAL = re.compile(
+    r"^(?:(?P<dec>1)(?:[.．、](?!\d)|\s)|(?P<cn>第\s*(?:一|1(?!\d))\s*(?:部分|章|条)))"
+)
+ARABIC_CHAPTER = re.compile(r"^第\s*(\d{1,2})\s*章")
 MD_HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
 
 # 一行接近 PDF 整行宽度、结尾没有句末/闭合标点，说明是被换行或分页截断的半句话
@@ -128,6 +133,18 @@ def _split_lines(markdown: str) -> list[Line]:
     return lines
 
 
+def _parens_balanced(text: str) -> bool:
+    depth = 0
+    for ch in text:
+        if ch in "（(":
+            depth += 1
+        elif ch in "）)":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
 def heading_kind(line: Line) -> str | None:
     """有编号的标题返回编号类型，否则 None。"""
     if line.is_table:
@@ -140,8 +157,11 @@ def heading_kind(line: Line) -> str | None:
     # MinerU 有时会把整句标成 #（如"## 一、本保险合同保险金额由...约定。"），同样按正文处理
     if text.endswith(SENTENCE_END):
         return None
-    # 标题里不会出现逗号句号等句内标点；有的是被截断的半句话（"（3）由……（CDR，Clinical"）
-    if CLAUSE_PUNCT.search(text):
+    # 含句内标点的编号行多半是被截断的半句话（"（3）由具有评估资格的专科医生……（CDR，Clinical"，
+    # 括号没有闭合）。但 MinerU 标了 # 且括号配对的，可能是真标题，如
+    # "八十四、语言能力完全丧失，或严重咀嚼吞咽功能障碍"、
+    # "八十八、美国纽约心脏病学会（…，NYHA）…分级"
+    if CLAUSE_PUNCT.search(text) and not (line.marked_heading and _parens_balanced(text)):
         return None
     for kind, pattern in HEADING_PATTERNS:
         if pattern.match(text):
@@ -191,6 +211,20 @@ def _remove_noise(lines: list[Line], removed: Counter[str]) -> list[Line]:
     return kept
 
 
+def _is_prose(line: Line) -> bool:
+    """完整的句子（目录项不会有句内标点，更不会有句号）。"""
+    text = line.text
+    if line.is_table or not CLAUSE_PUNCT.search(text):
+        return False
+    return "。" in text or len(text) > MAX_HEADING_CHARS
+
+
+def _heading_title(text: str) -> str:
+    """去掉开头编号和所有空白、标点后的标题文字，用于比较目录项和正文标题。"""
+    stripped = FIRST_ORDINAL.sub("", text, count=1)
+    return re.sub(r"[\s\W_]+", "", stripped)
+
+
 def _drop_toc_block(lines: list[Line], removed: Counter[str]) -> list[Line]:
     """删除从"目录"标记到正文第一章开始之前的整块内容。
 
@@ -206,21 +240,44 @@ def _drop_toc_block(lines: list[Line], removed: Counter[str]) -> list[Line]:
         m = None if ln.is_table else FIRST_ORDINAL.match(ln.text)
         return (m.group("dec") or m.group("cn")) if m else None
 
-    # 目录里的第一个"第 1 章"编号，正文开始于同一编号第二次出现处
-    # （必须是同一种编号："第一部分"之后出现"第一条"是正文的下一级，不是目录结束）
+    # 目录里的第一个"第 1 章"，正文开始于同一标题的"第 1 章"再次出现处。
+    # - 以标题文字为准：目录项常已被逐行删掉，此时"第一次"就是正文标题，后面恰好也以
+    #   "1." 开头的行只是巧合（曾因只比编号而误删了 3 份条款的第 1 章标题和正文）；
+    #   "第一部分 总则"之后的"第一条 合同构成"标题不同，也不会被误认为目录结束。
+    # - 不要求编号写法相同：中英条款目录写"1 您与我们的保险合同"，正文写"第 1章 您与……"
     first = next((i for i in range(marker + 1, len(lines)) if ordinal(lines[i])), None)
-    token = ordinal(lines[first]) if first is not None else None
-    second = (
-        next((i for i in range(first + 1, len(lines)) if ordinal(lines[i]) == token), None)
-        if first is not None
-        else None
-    )
-    if second is None:
-        # 没有成块的目录（目录项已被逐行删掉，或根本没有）：只删"目录"这一行
-        removed["toc"] += 1
-        return lines[:marker] + lines[marker + 1 :]
-    removed["toc_block"] += second - marker
-    return lines[:marker] + lines[second:]
+    second = None
+    title = ""
+    if first is not None:
+        title = _heading_title(lines[first].text)
+        second = next(
+            (
+                i
+                for i in range(first + 1, len(lines))
+                if ordinal(lines[i]) and _heading_title(lines[i].text) == title
+            ),
+            None,
+        )
+    if second is None or not title:
+        # 没有成块的目录（目录项大多已被逐行删掉）：删"目录"这一行，以及紧跟其后、
+        # 连续的未标 # 的短编号行（多栏目录的残余，如福有余的"12.17 军事冲突"…"12.22 情形复杂"），
+        # 遇到 # 标题、完整句子或"第 1 章"编号（正文从这里开始）即停。
+        # 不删的话它们会成为后面正文的"上级标题"
+        end = marker + 1
+        while (
+            end < len(lines)
+            and not lines[end].marked_heading
+            and not _is_prose(lines[end])
+            and heading_kind(lines[end]) is not None
+            and not ordinal(lines[end])
+        ):
+            end += 1
+        removed["toc"] += end - marker
+        return lines[:marker] + lines[end:]
+    # 目录块内只删像目录项的行；完整的句子（如"本公司在每页底部对专业名词做了释义……"）保留
+    kept = [ln for ln in lines[marker + 1 : second] if _is_prose(ln)]
+    removed["toc_block"] += (second - marker) - len(kept)
+    return lines[:marker] + kept + lines[second:]
 
 
 def _split_inline_headings(lines: list[Line], removed: Counter[str]) -> list[Line]:
@@ -270,6 +327,9 @@ DECIMAL_PREFIX = re.compile(r"^(\d{1,2})(?:[.．](\d{1,2}))?(?:[.．](\d{1,2}))?
 
 
 def decimal_numbers(text: str) -> tuple[int, ...] | None:
+    chapter = ARABIC_CHAPTER.match(text)
+    if chapter:  # "第 2 章" 视同 "2."，这样 "2.1" 不会挂到 "第 1章" 下面
+        return (int(chapter.group(1)),)
     m = DECIMAL_PREFIX.match(text)
     return tuple(int(g) for g in m.groups() if g is not None) if m else None
 
@@ -308,6 +368,13 @@ def build_sections(markdown: str, *, title_hint: str | None = None) -> Structure
             break
 
     kinds = [heading_kind(ln) for ln in lines]
+    # 章节用"第 N 章 + N.M"编号时，章已经占了第一级，正文里的"1. 身故保险金""2. ……"只是列表项。
+    # 否则"2.2 责任免除"会被挂到列表项"2. 重大自然灾害意外身故保险金"下面
+    if "dec2" in kinds and any(
+        k == "part" and ARABIC_CHAPTER.match(ln.text) for ln, k in zip(lines, kinds, strict=True)
+    ):
+        removed["dec1_as_list_item"] += kinds.count("dec1")
+        kinds = [None if k == "dec1" else k for k in kinds]
     levels = _assign_levels([k for k in kinds if k is not None])
 
     sections: list[Section] = []
@@ -339,7 +406,7 @@ def build_sections(markdown: str, *, title_hint: str | None = None) -> Structure
         sections.append(current)
         while stack and stack[-1][0] >= level:
             stack.pop()
-        nums = decimal_numbers(ln.text) if kind in DECIMAL_ORDER else None
+        nums = decimal_numbers(ln.text) if kind in (*DECIMAL_ORDER, "part") else None
         if nums is not None:
             # 数字编号的上级必须是它的前缀："9.4" 只能挂在 "9." 下。
             # 不一致说明栈里有被误判成标题的列表项（如正文里的"2. 重大自然灾害…"），去掉它

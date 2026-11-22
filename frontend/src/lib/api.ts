@@ -4,7 +4,7 @@ import { useAuthStore } from '../stores/auth'
 import type {
   ClauseDocument,
   Page,
-  ParentPreview,
+  ParentPage,
   Product,
   ProductCategory,
   TokenResponse,
@@ -113,6 +113,6 @@ export const adminApi = {
     form.append('file', file)
     return request<ClauseDocument>('/api/v1/admin/documents', { method: 'POST', body: form })
   },
-  parents: (id: number) =>
-    request<ParentPreview[]>(`/api/v1/admin/documents/${id}/parents?limit=200`),
+  parents: (id: number, offset: number, limit: number) =>
+    request<ParentPage>(`/api/v1/admin/documents/${id}/parents?offset=${offset}&limit=${limit}`),
 }

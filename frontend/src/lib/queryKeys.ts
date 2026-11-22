@@ -9,5 +9,6 @@ export const USER_SCOPE = 'me'
 export const queryKeys = {
   currentUser: [USER_SCOPE, 'user'] as const,
   adminDocuments: [USER_SCOPE, 'admin', 'documents'] as const,
-  adminParents: (id: number) => [USER_SCOPE, 'admin', 'documents', id, 'parents'] as const,
+  adminParents: (id: number, page: number) =>
+    [USER_SCOPE, 'admin', 'documents', id, 'parents', page] as const,
 }

@@ -212,3 +212,62 @@ async def test_auth_error_marks_failed_and_propagates(
         doc = await s.scalar(select(Document).where(Document.file_name == pdf.name))
         assert doc is not None and doc.status == DocumentStatus.FAILED
         assert doc.error == "MinerU token 无效或已过期"
+
+
+async def get_doc(factory: async_sessionmaker[AsyncSession], name: str) -> Document:
+    async with factory() as s:
+        doc = await s.scalar(select(Document).where(Document.file_name == name))
+        assert doc is not None
+        return doc
+
+
+async def test_failed_reindex_keeps_previous_version_searchable(
+    session_factory: async_sessionmaker[AsyncSession], pdf: Path
+) -> None:
+    """最近一次操作失败 ≠ 文档不可用：旧块与 indexed_hash 都保留，检索按 indexed_hash 判断。"""
+    embedder = FakeEmbedder()
+    pipeline = make_pipeline(session_factory, FakeParser(DEC_STYLE), embedder)
+    await pipeline.ingest(pdf)
+    v1 = await get_doc(session_factory, pdf.name)
+    assert v1.searchable and not v1.stale and v1.indexed_hash == v1.file_hash
+
+    # 上传了新版本，但向量化失败
+    pdf.write_bytes(b"%PDF-fake v2")  # noqa: ASYNC240
+    embedder.fail = True
+    assert (await pipeline.ingest(pdf)).outcome == "failed"
+    v2 = await get_doc(session_factory, pdf.name)
+    assert v2.status == DocumentStatus.FAILED
+    assert v2.searchable  # 旧版本的块仍可检索
+    assert v2.stale  # 但它们不是当前文件版本
+    assert v2.indexed_hash == v1.indexed_hash
+    assert (v2.parent_count, v2.child_count) == (3, 4)  # 计数描述的是库里现有的块
+
+
+async def test_failed_document_is_retried_without_force(
+    session_factory: async_sessionmaker[AsyncSession], pdf: Path
+) -> None:
+    embedder = FakeEmbedder()
+    pipeline = make_pipeline(session_factory, FakeParser(DEC_STYLE), embedder)
+    await pipeline.ingest(pdf)
+    embedder.fail = True
+    await pipeline.ingest(pdf, force=True)  # 同一版本重新入库失败
+    embedder.fail = False
+    # 内容没变，但上次失败了：不带 --force 也要重试，而不是跳过
+    assert (await pipeline.ingest(pdf)).outcome == "indexed"
+    doc = await get_doc(session_factory, pdf.name)
+    assert doc.status == DocumentStatus.INDEXED and not doc.stale
+
+
+async def test_register_is_idempotent_for_existing_row(
+    session_factory: async_sessionmaker[AsyncSession], pdf: Path
+) -> None:
+    """另一进程已登记同名文档时（ON CONFLICT DO NOTHING 分支），复用已有行而不是报错。"""
+    async with session_factory() as s, s.begin():
+        s.add(Document(file_name=pdf.name, file_hash="someone-else"))
+    result = await make_pipeline(session_factory, FakeParser(DEC_STYLE), FakeEmbedder()).ingest(pdf)
+    assert result.outcome == "indexed"
+    async with session_factory() as s:
+        count = await s.scalar(
+            select(func.count()).select_from(Document).where(Document.file_name == pdf.name)
+        )
+    assert count == 1

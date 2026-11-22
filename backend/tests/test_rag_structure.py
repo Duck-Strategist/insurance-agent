@@ -279,3 +279,111 @@ def test_long_table_is_split_into_multiple_children() -> None:
     assert all(c.content.startswith(f"<table>{header}") for c in children)
     assert parents[0].section_path == ["附表一 重大疾病"]
     assert all(len(p.content) <= 2500 + 20 for p in parents)
+
+
+# ---- M2 代码审查发现的问题 ----
+
+
+def test_toc_block_requires_same_title_not_just_same_number() -> None:
+    """目录项已被逐行删掉时，"1. 合同订立"后面的"1.1 合同构成"不是目录结束，不能删中间的正文。"""
+    md = (
+        "# 某条款\n\n条款目录\n\n"
+        "# 1. 合同订立\n\n“本条款”简称“本合同”。在本保险条款中，“您”指投保人。\n\n"
+        "1.1 合同构成\n\n本合同由保险单组成。"
+    )
+    result = build_sections(md)
+    assert [s.path for s in result.sections] == [
+        ["1. 合同订立"],
+        ["1. 合同订立", "1.1 合同构成"],
+    ]
+    assert "“您”指投保人" in result.sections[0].text
+    assert "toc_block" not in result.stats["removed_lines"]
+
+
+def test_toc_block_with_matching_title_is_dropped() -> None:
+    md = (
+        "# 某条款\n\n目录\n\n1. 合同订立\n\n2. 保障内容\n\n"
+        "# 1. 合同订立\n\n# 1.1 合同构成\n\n正文。"
+    )
+    result = build_sections(md)
+    assert [s.path for s in result.sections] == [["1. 合同订立", "1.1 合同构成"]]
+    assert result.stats["removed_lines"]["toc_block"] == 3
+
+
+def test_marked_heading_with_comma_and_balanced_parens_is_heading() -> None:
+    md = (
+        "# 第七部分 释义\n\n"
+        "## 八十四、语言能力完全丧失，或严重咀嚼吞咽功能障碍\n\n指……。\n\n"
+        "## 八十八、美国纽约心脏病学会（New York Heart Association，NYHA）心功能状态分级\n\n"
+        "指……。"
+    )
+    assert [p[-1] for p in paths(md)] == [
+        "八十四、语言能力完全丧失，或严重咀嚼吞咽功能障碍",
+        "八十八、美国纽约心脏病学会（New York Heart Association，NYHA）心功能状态分级",
+    ]
+
+
+def test_truncated_line_with_unclosed_paren_is_body() -> None:
+    md = (
+        "# 1.2 阿尔茨海默病\n\n"
+        "## （3） 由具有评估资格的专科医生根据临床痴呆评定量表（CDR，Clinical\n\n"
+        "Dementia Rating）评估结果为 3 分。"
+    )
+    assert paths(md) == [["1.2 阿尔茨海默病"]]
+
+
+def test_arabic_chapter_with_spaces_and_list_items() -> None:
+    """中英条款：章用"第 1章"，节用"1.7"，正文里的"1. 身故保险金"是列表项。第 2 章标题缺失。"""
+    md = (
+        "# 中英人寿条款\n\n"
+        "## 第 1章 您与我们的保险合同\n\n## 1.7 未成年人身故保险金限制\n\n正文A。\n\n"
+        "## 2.1 保险责任\n\n## 1. 身故保险金\n\n身故给付。\n\n"
+        "## 2. 重大自然灾害意外身故保险金\n\n灾害给付。\n\n## 2.2 责任免除\n\n免责正文。\n\n"
+        "## 第 3 章 红利\n\n## 3.1 红利的分配\n\n分红正文。"
+    )
+    result = build_sections(md)
+    assert [s.path for s in result.sections] == [
+        ["第 1章 您与我们的保险合同", "1.7 未成年人身故保险金限制"],
+        ["2.1 保险责任"],  # 第 2 章标题缺失：不能挂到第 1 章下
+        ["2.2 责任免除"],  # 不能挂到列表项"2. 重大自然灾害…"下
+        ["第 3 章 红利", "3.1 红利的分配"],
+    ]
+    assert "1. 身故保险金" in result.sections[1].text
+    assert result.stats["removed_lines"]["dec1_as_list_item"] == 2
+
+
+def test_prose_inside_toc_block_is_kept() -> None:
+    md = (
+        "# 某条款\n\n条款目录\n\n1. 合同订立\n\n1.1 合同构成\n\n"
+        "（本公司在每页底部对一些专业名词做了释义，这些释义为本条款的重要组成部分。）\n\n"
+        "# 1. 合同订立\n\n# 1.1 合同构成\n\n正文。"
+    )
+    result = build_sections(md)
+    all_text = "\n".join(s.text for s in result.sections)
+    assert "本公司在每页底部对一些专业名词做了释义" in all_text
+    assert result.stats["removed_lines"]["toc_block"] == 3
+
+
+def test_toc_entry_and_body_heading_may_use_different_numbering_styles() -> None:
+    md = (
+        "# 中英人寿条款\n\n## 条款目录\n\n1 您与我们的保险合同\n\n1.1 合同构成\n\n"
+        "## 第 1章 您与我们的保险合同\n\n## 1.1 合同构成\n\n正文。"
+    )
+    result = build_sections(md)
+    assert [s.path for s in result.sections] == [["第 1章 您与我们的保险合同", "1.1 合同构成"]]
+
+
+def test_leftover_toc_entries_after_marker_are_dropped() -> None:
+    """福有余：多栏目录行已逐行删掉，但单独成行的尾部目录项残留，不能成为后文正文的上级。"""
+    md = (
+        "# 阅读指引\n\n您享有的权益。\n\n## 条款目录\n\n"
+        "12.21 鉴定机构\n\n12.22 情形复杂\n\n"
+        "# 中国太平洋人寿保险股份有限公司\n\n"
+        "“本条款”简称“本合同”。在本保险条款中，“您”指投保人。\n\n"
+        "## 1． 您与我们订立的合同\n\n1.1 合同构成\n\n本合同由保险单组成。"
+    )
+    result = build_sections(md)
+    paths_ = [s.path for s in result.sections]
+    assert not any("12.22 情形复杂" in p for p in paths_)
+    definition = next(s for s in result.sections if "“您”指投保人" in s.text)
+    assert definition.path == ["中国太平洋人寿保险股份有限公司"]
