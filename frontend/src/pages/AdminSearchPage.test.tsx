@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react'
+import { fireEvent, screen, waitFor } from '@testing-library/react'
 
 import type { EvalRun, SearchResponse } from '../lib/types'
 import { useAuthStore } from '../stores/auth'
@@ -86,4 +86,25 @@ test('评测记录页展示配置与指标', async () => {
   expect(screen.getByText('79.4%')).toBeInTheDocument()
   expect(screen.getByText('2047 / 2984')).toBeInTheDocument()
   await waitFor(() => expect(screen.getByText('gte-rerank-v2')).toBeInTheDocument())
+})
+
+test('条款原文里的表格和上标按结构显示，不露出标签（spec Q26）', async () => {
+  useAuthStore.setState({ token: 't', user: admin })
+  const hit = {
+    ...result.hits[0],
+    snippet: '（9） 既往症<sup>61</sup>（被保险人已如实告知）',
+    parent_content: '1 合同订立\n<table><tr><td>1.1</td><td>合同构成</td></tr></table>',
+  }
+  mockFetch({
+    '/health': healthOk,
+    '/api/v1/auth/me': () => jsonResponse(admin),
+    '/api/v1/admin/documents': () => jsonResponse([]),
+    '/api/v1/admin/search': () => jsonResponse({ ...result, hits: [hit] }),
+  })
+  const { container } = renderAt('/admin/search?q=既往症')
+
+  expect(await screen.findByText('61')).toHaveProperty('tagName', 'SUP')
+  fireEvent.click(screen.getByText('章节原文（13 字）'))
+  expect(await screen.findByRole('cell', { name: '合同构成' })).toBeInTheDocument()
+  expect(container.textContent).not.toMatch(/<\/?(sup|table|td)/)
 })

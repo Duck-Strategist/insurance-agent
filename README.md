@@ -200,7 +200,7 @@ uv run python -m app.eval e2e            # 端到端（qwen-max 裁判）+ 导�
 | `frontend/src/` | 页面、组件、`lib/`（请求、SSE、格式化）、`stores/`（Zustand） |
 | `data/eval/` | 评测集（`*.jsonl`）；原始 PDF 与解析缓存不入库 |
 | `eval/` | 评测报告与汇总 |
-| `docs/` | [设计文档 SPEC](docs/SPEC.md)（决策 D1–D62、风险 Q1–Q26）、[面试故事集](docs/INTERVIEW.md)、[演示脚本](docs/DEMO.md) |
+| `docs/` | [设计文档 SPEC](docs/SPEC.md)（决策 D1–D63、风险 Q1–Q26）、[面试故事集](docs/INTERVIEW.md)、[演示脚本](docs/DEMO.md) |
 
 开发约定（也供 Claude Code 使用）见 [CLAUDE.md](CLAUDE.md)。
 

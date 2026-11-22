@@ -2,7 +2,7 @@
 
 安心保 · 智能保险顾问：RAG + LangGraph 的保险顾问 Agent（学习 + 面试作品项目）。
 
-- 设计与决策：[docs/SPEC.md](docs/SPEC.md)（决策 D1–D62、里程碑 M0–M9、风险 Q1–Q26）。做设计取舍前先查，取舍定了就补一条决策。
+- 设计与决策：[docs/SPEC.md](docs/SPEC.md)（决策 D1–D63、里程碑 M0–M9、风险 Q1–Q26）。做设计取舍前先查，取舍定了就补一条决策。
 - 面试故事集：[docs/INTERVIEW.md](docs/INTERVIEW.md)。每个里程碑结束后补充（见「工作流程」）。
 - 参考实现 `../hm-insurance/` 是教学项目，只读对照，不复制代码，它的 `.env` 里有泄露过的密钥，不要使用。
 
@@ -125,6 +125,7 @@ npm run lint ; npx tsc -b ; npm run test ; npm run build
 - 属于当前用户的数据，queryKey 必须以 `USER_SCOPE`（`src/lib/queryKeys.ts`）开头，登录身份变化时会被统一清掉。
 - 非组件的工具函数放 `src/lib/`，不要从页面文件导出（react-refresh lint）。
 - 筛选、页码等放 URL 参数；跳转回来源页用 `safeRedirect`。
+- 条款原文（引用、检索结果）一律用 `components/ClauseText` 显示：它把表格、上下标、公式解析成结构再渲染（D63），不要用 innerHTML，也不要直接输出字符串。
 - 对话流式状态放 `stores/chat.ts`（Zustand），历史消息放 TanStack Query；SSE 用 `chatApi.stream`（fetch + `lib/sse.ts`，带 JWT），不用 EventSource。
 
 ## 测试约定

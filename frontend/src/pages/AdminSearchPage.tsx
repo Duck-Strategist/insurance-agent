@@ -13,9 +13,12 @@ import {
   Tag,
   Typography,
 } from 'antd'
+import { useLayoutEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router'
 
+import { ClauseText } from '../components/ClauseText'
 import { adminApi } from '../lib/api'
+import { clauseLength } from '../lib/clauseText'
 import { queryKeys } from '../lib/queryKeys'
 import { SEARCH_MODE_LABELS, type SearchHit, type SearchMode } from '../lib/types'
 
@@ -41,6 +44,33 @@ function parseDocId(raw: string | null): number | undefined {
   return raw && Number.isInteger(n) && n > 0 ? n : undefined
 }
 
+/**
+ * 命中片段，默认显示 3 行。antd 的 ellipsis 在子元素不是纯字符串时（上下标）会截成空白，
+ * 所以用 CSS 行数截断，自己判断是否溢出（spec Q26）。
+ */
+function Snippet({ text }: { text: string }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [open, setOpen] = useState(false)
+  const [overflow, setOverflow] = useState(false)
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (el && !open) setOverflow(el.scrollHeight > el.clientHeight + 1)
+  }, [text, open])
+  const clamp = open
+    ? {}
+    : { display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical' as const, overflow: 'hidden' }
+  return (
+    <div>
+      <div ref={ref} style={{ whiteSpace: 'pre-wrap', ...clamp }}>
+        <ClauseText text={text.trim()} flat />
+      </div>
+      {(overflow || open) && (
+        <Typography.Link onClick={() => setOpen(!open)}>{open ? '收起' : '展开'}</Typography.Link>
+      )}
+    </div>
+  )
+}
+
 function HitCard({ hit, rank }: { hit: SearchHit; rank: number }) {
   return (
     <Card size="small">
@@ -51,22 +81,17 @@ function HitCard({ hit, rank }: { hit: SearchHit; rank: number }) {
           <Typography.Text type="secondary">{hit.section_path.join(' › ') || '（无标题）'}</Typography.Text>
           <Tag>分数 {hit.score.toFixed(3)}</Tag>
         </Space>
-        <Typography.Paragraph
-          style={{ marginBottom: 0, whiteSpace: 'pre-wrap' }}
-          ellipsis={{ rows: 3, expandable: 'collapsible' }}
-        >
-          {hit.snippet}
-        </Typography.Paragraph>
+        <Snippet text={hit.snippet} />
         <Collapse
           size="small"
           ghost
           items={[
             {
               key: 'parent',
-              label: `章节原文（${hit.parent_content.length} 字）`,
+              label: `章节原文（${clauseLength(hit.parent_content)} 字）`,
               children: (
                 <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}>
-                  {hit.parent_content}
+                  <ClauseText text={hit.parent_content} />
                 </Typography.Paragraph>
               ),
             },

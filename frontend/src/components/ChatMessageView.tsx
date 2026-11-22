@@ -4,6 +4,7 @@ import { Fragment, useMemo, useState } from 'react'
 
 import { splitLine } from '../lib/answer'
 import type { Citation, PlanAction, PlanCardData } from '../lib/types'
+import { ClauseText } from './ClauseText'
 import { PlanCard } from './PlanCard'
 
 function AnswerText({
@@ -70,7 +71,7 @@ function CitationList({
         ),
         children: (
           <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 0, fontSize: 13 }}>
-            {c.parent_content}
+            <ClauseText text={c.parent_content} />
           </Typography.Paragraph>
         ),
       }))}
