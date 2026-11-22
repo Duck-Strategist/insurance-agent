@@ -110,17 +110,17 @@ flowchart LR
 
 ## 评测结果
 
-所有数字都来自 `eval_runs` 表（后台「评测记录」页可查），括号里是运行编号；详细报告与失败案例见 [eval/README.md](eval/README.md)。
+评测数字都来自 `eval_runs` 表（后台「评测记录」页可查），括号里是运行编号；报价来自单测，延迟来自 Langfuse trace。详细报告与失败案例见 [eval/README.md](eval/README.md)。
 
 | 评测 | 数据集 | 结果 |
 |---|---|---|
 | 检索（混合 + 重排） | 生成集 166 题 / 手写口语难题集 34 题 | R@5 **1.000** / **0.941**，MRR 0.982 / 0.828（#67 / #70） |
 | 检索三组对照 | 难题集 | 纯向量 R@5 0.794，混合 0.647（全文召回在口语题上是噪声），混合 + 重排 0.941 |
 | 路由 | 测试集 203 题（多轮 55），另有开发集 51 题 | 准确率 **0.956**，宏 F1 0.952，多轮 0.964，产品识别 0.991（#143） |
-| 端到端条款问答 | 86 题（12 题条款里没有答案） | 人工抽检正确性 **0.917**（30 道有答案题）；无答案题拒答率 1.000、编造率 0；误拒率 0（#147） |
+| 端到端条款问答 | 86 题（12 题条款里没有答案） | 人工抽检正确性 **0.917**（两批各 15 道有答案题：0.933 / 0.900，#147 / #158 的 `metrics.human`）；无答案题拒答率 1.000、编造率 0；误拒率 0（#147） |
 | LLM 裁判（qwen-max） | 人工盲标 17 题 | 正确性与人工一致 0.882（kappa 0.45），仍偏松，所以报数以人工抽检为准（#158） |
 | 报价 | 对照 PDF 页面图像人工读出的抽样点 | 107 / 107 一致（单测） |
-| 延迟 | 本机 compose，qwen-plus | 条款问答首 token 7.6–9.8 秒；每轮约 3.2–3.8k token |
+| 延迟 | 本机 compose，qwen-plus，Langfuse trace 3 轮 | 条款问答首 token 7.6–9.8 秒；每轮约 3.2–3.8k token |
 
 <details>
 <summary>评测方法上的几个坑（详见 <a href="docs/INTERVIEW.md">docs/INTERVIEW.md</a>）</summary>
@@ -135,25 +135,30 @@ flowchart LR
 
 | 层 | 选型 |
 |---|---|
-| 后端 | Python 3.12、FastAPI、SQLAlchemy 2（async）+ psycopg、Alembic、pydantic-settings、structlog、uv |
+| 后端 | Python 3.12、FastAPI、SQLAlchemy 2（async，asyncpg）、psycopg（LangGraph checkpointer）、Alembic、pydantic-settings、structlog、uv |
 | Agent | LangGraph（`AsyncPostgresSaver` checkpointer、`interrupt`、自定义流事件）、LangChain OpenAI 兼容接口 |
 | 模型 | DashScope：qwen-plus（对话）、qwen-max（评测裁判）、text-embedding-v4、qwen3-rerank；任何 OpenAI 兼容接口都能替换对话模型 |
 | 检索 | PostgreSQL 17 + pgvector（HNSW）、jieba 分词 + `simple` 全文索引（不装中文分词插件） |
 | 文档解析 | MinerU；费率表用 pdfplumber / pypdfium2 按单元格提取 |
 | 前端 | React 19、antd 6、React Router、TanStack Query、Zustand、Vite、Vitest |
-| 工程 | Docker Compose、GitHub Actions（ruff、mypy、alembic check、pytest 406 个用例；eslint、tsc、vitest、build）、Langfuse 自托管 |
+| 工程 | Docker Compose、GitHub Actions（ruff、mypy、alembic check、pytest 406 个用例；oxlint、tsc、vitest、build）、Langfuse 自托管 |
 
 ## 快速开始
 
 前置：Docker Desktop、[uv](https://docs.astral.sh/uv/)、Node 24；DashScope API Key（向量化、重排、对话）；入库条款还需要 MinerU Token。
 
 ```powershell
-# 1. 配置密钥（.env 已 gitignore）
-copy backend\.env.example backend\.env      # 填 RAG__DASHSCOPE_API_KEY、RAG__MINERU_TOKEN
+# 1. 容器用的密钥写进 deploy/.env（已 gitignore）：compose 从这里读，变量名不带前缀
+#    DASHSCOPE_API_KEY=...
+#    MINERU_TOKEN=...
+notepad deploy\.env
 
 # 2. 一键起全套：前端 http://localhost:8080，后端 http://localhost:8000/docs
 docker compose -f deploy/docker-compose.yml up -d --build
 ```
+
+在宿主机上跑 `uv run`（入库、评测、本地开发）读的是另一份 `backend/.env`，变量名带前缀：
+`copy backend\.env.example backend\.env`，填 `RAG__DASHSCOPE_API_KEY`、`RAG__MINERU_TOKEN`。
 
 容器启动时自动执行迁移、写入演示产品和费率表。条款需要另外入库（条款 PDF 不在仓库里，放到 `data/raw/`）：
 

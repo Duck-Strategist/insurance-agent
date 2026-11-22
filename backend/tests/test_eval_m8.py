@@ -261,6 +261,12 @@ def test_human_sample_csv_and_agreement(tmp_path: Path) -> None:
     assert got["correctness_agreement"] == 0.8
     assert got["refused_agreement"] == 1.0
     assert got["citations_agreement"] == 0.75  # 第 2 题裁判说有依据、人工说没有
+    # 人工自己的分数：正确性只算有答案题（partial 记 0.5），引用只算人工填了的题
+    human = {r["id"]: (r["answerable"], r["human_correctness"]) for r in back}
+    scores = [{"correct": 1.0, "partial": 0.5}[c] for a, c in human.values() if a == "是"]
+    assert got["human_answerable_n"] == 4
+    assert got["human_correctness"] == round(sum(scores) / 4, 4)
+    assert got["human_cited_n"] == 4 and got["human_citations_ok"] == 0.75
 
 
 def test_cohen_kappa() -> None:

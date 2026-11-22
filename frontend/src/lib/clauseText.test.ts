@@ -103,6 +103,49 @@ test('公式：上下标、字体包装与符号', () => {
   expect(mathToInline('x^{2')).toBeNull()
   // 没有公式记号：不是公式（如 $100 和 $200 之间的文字）
   expect(mathToInline('100 和 ')).toBeNull()
+  // \text{} 里的空格保留，其余空格去掉
+  expect(flat('\\text{per year} \\times 2')).toBe('per year×2')
+  expect(flat('\\text { mmHg } _ { 2 }')).toBe('mmHgsub(2)')
+})
+
+test('不是公式的一对 $ 不会吞掉后面公式的开头', () => {
+  expect(parseClause('费用 $5 起，指标 $PaO_2$ 偏低')).toEqual([
+    {
+      kind: 'inline',
+      parts: [
+        { kind: 'text', text: '费用 $5 起，指标 PaO' },
+        { kind: 'sub', text: '2' },
+        { kind: 'text', text: ' 偏低' },
+      ],
+    },
+  ])
+  expect(parseClause('只有一个 $ 号')).toEqual([{ kind: 'inline', parts: [{ kind: 'text', text: '只有一个 $ 号' }] }])
+})
+
+test('没闭合的上下标不跨单元格和表格延续', () => {
+  const blocks = parseClause('<table><tr><td>保额<sup>1</td><td>说明</td></tr></table>后文')
+  expect(blocks[0].kind === 'table' && blocks[0].rows[0].map((c) => c.parts)).toEqual([
+    [
+      { kind: 'text', text: '保额' },
+      { kind: 'sup', text: '1' },
+    ],
+    [{ kind: 'text', text: '说明' }],
+  ])
+  expect(blocks[1]).toEqual({ kind: 'inline', parts: [{ kind: 'text', text: '后文' }] })
+})
+
+test('嵌套表格压成文字放回外层单元格，外层结构不断', () => {
+  const blocks = parseClause(
+    '<table><tr><td>A<table><tr><td>x</td><td>y</td></tr></table></td><td>B</td></tr><tr><td>C</td></tr></table>',
+  )
+  expect(blocks).toHaveLength(1)
+  expect(blocks[0].kind === 'table' && blocks[0].rows.map((r) => r.map((c) => c.parts.map((p) => p.text).join('')))).toEqual([
+    ['A\nx | y', 'B'],
+    ['C'],
+  ])
+  // 截断在内层表格里
+  const cut = parseClause('<table><tr><td>A<table><tr><td>x')
+  expect(cut[0].kind === 'table' && cut[0].rows[0][0].parts).toEqual([{ kind: 'text', text: 'A\nx' }])
 })
 
 test('原文里的公式就地转换，转不了的保留 $', () => {

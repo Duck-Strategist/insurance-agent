@@ -431,7 +431,21 @@ def agreement(rows: Sequence[dict[str, str]]) -> dict[str, Any]:
         for r in labeled
         if r["judge_citations"] and _yes_no(r["human_citations_ok"]) is not None
     ]
+    # 人工自己的分数（不和裁判比）：文档里引用的「人工抽检正确性」要能在 eval_runs 里查到
+    answerable = [r["human_correctness"].strip() for r in labeled if _yes_no(r["answerable"])]
+    human_cited = [ok for r in labeled if (ok := _yes_no(r["human_citations_ok"])) is not None]
     return {
+        "human_correctness": (
+            round(sum(CORRECTNESS_SCORE[c] for c in answerable) / len(answerable), 4)
+            if answerable
+            else None
+        ),
+        "human_answerable_n": len(answerable),
+        # 有引用的回答里，人工认为全部引用都有依据的比例
+        "human_citations_ok": (
+            round(sum(human_cited) / len(human_cited), 4) if human_cited else None
+        ),
+        "human_cited_n": len(human_cited),
         "n": len(labeled),
         "of": len(rows),
         "correctness_agreement": round(

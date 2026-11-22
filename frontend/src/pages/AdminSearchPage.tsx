@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import {
   Alert,
+  Button,
   Card,
   Collapse,
   Empty,
@@ -54,7 +55,13 @@ function Snippet({ text }: { text: string }) {
   const [overflow, setOverflow] = useState(false)
   useLayoutEffect(() => {
     const el = ref.current
-    if (el && !open) setOverflow(el.scrollHeight > el.clientHeight + 1)
+    if (!el || open) return
+    const measure = () => setOverflow(el.scrollHeight > el.clientHeight + 1)
+    measure()
+    // 窗口变窄、字体加载完后行数会变，重新判断要不要显示「展开」
+    const observer = new ResizeObserver(measure)
+    observer.observe(el)
+    return () => observer.disconnect()
   }, [text, open])
   const clamp = open
     ? {}
@@ -65,7 +72,15 @@ function Snippet({ text }: { text: string }) {
         <ClauseText text={text.trim()} flat />
       </div>
       {(overflow || open) && (
-        <Typography.Link onClick={() => setOpen(!open)}>{open ? '收起' : '展开'}</Typography.Link>
+        <Button
+          type="link"
+          size="small"
+          style={{ padding: 0, height: 'auto' }}
+          aria-expanded={open}
+          onClick={() => setOpen(!open)}
+        >
+          {open ? '收起' : '展开'}
+        </Button>
       )}
     </div>
   )

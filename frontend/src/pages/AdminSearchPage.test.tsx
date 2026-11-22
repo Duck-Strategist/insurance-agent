@@ -108,3 +108,38 @@ test('条款原文里的表格和上标按结构显示，不露出标签（spec 
   expect(await screen.findByRole('cell', { name: '合同构成' })).toBeInTheDocument()
   expect(container.textContent).not.toMatch(/<\/?(sup|table|td)/)
 })
+
+test('片段放得下时不显示展开；窗口变窄溢出后出现可聚焦的展开按钮', async () => {
+  useAuthStore.setState({ token: 't', user: admin })
+  // jsdom 不排版：用假的 ResizeObserver 手动触发，scrollHeight 由测试控制
+  const observers: (() => void)[] = []
+  vi.stubGlobal(
+    'ResizeObserver',
+    class {
+      constructor(cb: () => void) {
+        observers.push(cb)
+      }
+      observe() {}
+      disconnect() {}
+    },
+  )
+  let height = 0
+  const spy = vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(() => height)
+  mockFetch({
+    '/health': healthOk,
+    '/api/v1/auth/me': () => jsonResponse(admin),
+    '/api/v1/admin/documents': () => jsonResponse([]),
+    '/api/v1/admin/search': () => jsonResponse(result),
+  })
+  renderAt('/admin/search?q=等待期')
+  await screen.findByText('指自本合同生效日零时起计算的一段时间')
+  expect(screen.queryByRole('button', { name: '展开' })).not.toBeInTheDocument()
+
+  height = 200
+  observers.forEach((cb) => cb())
+  const toggle = await screen.findByRole('button', { name: '展开' })
+  expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  fireEvent.click(toggle)
+  expect(screen.getByRole('button', { name: '收起' })).toHaveAttribute('aria-expanded', 'true')
+  spy.mockRestore()
+})

@@ -36,8 +36,11 @@ function append(parts: Inline[], kind: InlineKind, text: string) {
 
 // MinerU 把公式写成 $...$。条款里出现的只有上下标、字体包装和少数符号（spec D63），
 // 认识的转成文字和上下标；有不认识的命令就原样显示，不猜。
-const MATH = /\$([^$\n]{1,160})\$/g
-const MATH_WRAPPERS = /\\(?:mathrm|mathsf|mathbf|mathit|text|operatorname|left|right)\b/g
+const MATH_MAX = 160
+const MATH_WRAPPERS = /\\(?:mathrm|mathsf|mathbf|mathit|operatorname|left|right)\b/g
+// \text{...} 里是普通文字，空格要保留（公式其余部分的空格是 MinerU 的排版，要去掉）
+const MATH_TEXT = /\\text\s*\{([^{}]*)\}/g
+const KEEP_SPACE = '\u0000'
 const MATH_SYMBOLS: Record<string, string> = {
   times: '×',
   cdot: '·',
@@ -61,7 +64,10 @@ const MATH_SYMBOLS: Record<string, string> = {
 export function mathToInline(src: string): Inline[] | null {
   // 没有任何公式记号的不当公式（比如两处美元金额之间的文字），否则会被去掉空格
   if (!/[\\^_{]/.test(src)) return null
-  let s = src.replace(MATH_WRAPPERS, '').replace(/\\([%,;! ])/g, (_, c: string) => (c === '%' ? '%' : ''))
+  let s = src
+    .replace(MATH_TEXT, (_, inner: string) => `{${inner.trim().replace(/\s+/g, KEEP_SPACE)}}`)
+    .replace(MATH_WRAPPERS, '')
+    .replace(/\\([%,;! ])/g, (_, c: string) => (c === '%' ? '%' : ''))
   let unknown = false
   s = s.replace(/\\([a-zA-Z]+)/g, (_, name: string) => {
     const sym = MATH_SYMBOLS[name]
@@ -69,7 +75,7 @@ export function mathToInline(src: string): Inline[] | null {
     return sym ?? ''
   })
   if (unknown) return null
-  s = s.replace(/\s+/g, '')
+  s = s.replace(/\s+/g, '').replaceAll(KEEP_SPACE, ' ')
   const out: Inline[] = []
   let i = 0
   // 上下标的对象：一个字符，或一对花括号里的全部内容（内层的括号和上下标记号去掉）
@@ -105,13 +111,22 @@ export function mathToInline(src: string): Inline[] | null {
 
 /** 追加一段原文，其中的 $...$ 公式转成上下标；已经在上下标里时公式压成同一种。 */
 function appendSource(parts: Inline[], mode: InlineKind, text: string) {
-  let pos = 0
-  for (const m of text.matchAll(MATH)) {
-    const math = mathToInline(m[1])
-    if (!math) continue
-    append(parts, mode, text.slice(pos, m.index))
+  let pos = 0 // 已输出到这里
+  let open = text.indexOf('$')
+  while (open !== -1) {
+    const close = text.indexOf('$', open + 1)
+    if (close === -1) break
+    const body = text.slice(open + 1, close)
+    const math = body.length <= MATH_MAX && !body.includes('\n') ? mathToInline(body) : null
+    if (!math) {
+      // 这一对不是公式（如两处美元金额）：第二个 $ 可能是下一个公式的开头，从它重新配对
+      open = close
+      continue
+    }
+    append(parts, mode, text.slice(pos, open))
     math.forEach((p) => append(parts, mode === 'text' ? p.kind : mode, p.text))
-    pos = m.index + m[0].length
+    pos = close + 1
+    open = text.indexOf('$', pos)
   }
   append(parts, mode, text.slice(pos))
 }
@@ -141,6 +156,8 @@ export function parseClause(source: string): Block[] {
   let row: Cell[] | null = null
   let cell: Cell | null = null
   let afterTable = false
+  // 嵌套表格：进入内层前把外层的状态压栈，内层结束后压成文字放回外层的单元格
+  const outer: { rows: Cell[][]; row: Cell[] | null; cell: Cell }[] = []
 
   const flushInline = (beforeTable: boolean) => {
     if (afterTable) trimNewlines(inline, 'start')
@@ -158,6 +175,8 @@ export function parseClause(source: string): Block[] {
       row.push(cell)
     }
     cell = null
+    // 没闭合的上下标不跨单元格、行、表格延续（只在原文末尾被截断时才延续到结尾）
+    mode = 'text'
   }
   const closeRow = () => {
     closeCell()
@@ -170,6 +189,17 @@ export function parseClause(source: string): Block[] {
       afterTable = true
     }
     rows = null
+  }
+  /** 结束内层表格：压成「单元格 | 单元格」的文字行，接在外层当前单元格后面。 */
+  const closeInner = () => {
+    closeRow()
+    const inner = flattenTables([{ kind: 'table', rows: rows ?? [] }])
+    const parent = outer.pop()!
+    rows = parent.rows
+    row = parent.row
+    cell = parent.cell
+    if (cell.parts.length && inner.length) append(cell.parts, 'text', '\n')
+    for (const p of inner) append(cell.parts, p.kind, p.text)
   }
   const text = (t: string) => {
     if (!rows) return appendSource(inline, mode, t)
@@ -189,8 +219,17 @@ export function parseClause(source: string): Block[] {
     if (tag === 'sup' || tag === 'sub') {
       mode = closing ? 'text' : tag
     } else if (tag === 'table') {
-      if (closing) closeTable()
-      else {
+      if (!closing && rows) {
+        outer.push({ rows, row, cell: cell ?? { parts: [], header: false } })
+        rows = []
+        row = null
+        cell = null
+        mode = 'text'
+      } else if (closing && outer.length) {
+        closeInner()
+      } else if (closing) {
+        closeTable()
+      } else {
         closeTable()
         flushInline(true)
         rows = []
@@ -211,6 +250,8 @@ export function parseClause(source: string): Block[] {
     }
   }
   text(source.slice(pos))
+  // 截断在内层表格里：把内层压回外层
+  while (outer.length) closeInner()
   closeTable()
   flushInline(false)
   return blocks
