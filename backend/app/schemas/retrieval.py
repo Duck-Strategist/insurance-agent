@@ -37,3 +37,7 @@ class EvalRunOut(BaseModel):
     config: dict[str, Any]
     metrics: dict[str, Any]
     created_at: datetime
+
+
+class EvalRunDetail(EvalRunOut):
+    details: list[Any]

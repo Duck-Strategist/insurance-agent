@@ -28,7 +28,13 @@ from app.rag.factory import RagNotConfiguredError, check_configured, ingestion_p
 from app.rag.reranker import RerankError
 from app.rag.retriever import Retriever
 from app.schemas.document import DocumentOut, ParentPage
-from app.schemas.retrieval import EvalRunOut, SearchHitOut, SearchRequest, SearchResponse
+from app.schemas.retrieval import (
+    EvalRunDetail,
+    EvalRunOut,
+    SearchHitOut,
+    SearchRequest,
+    SearchResponse,
+)
 from app.services.document_service import DocumentService
 from app.services.eval_service import EvalService
 
@@ -202,3 +208,11 @@ async def list_eval_runs(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> list[EvalRunOut]:
     return await EvalService(session).list_runs(suite, limit)
+
+
+@router.get("/eval-runs/{run_id}", summary="一次评测运行的逐题结果（失败案例分析）")
+async def get_eval_run(_: AdminUser, session: SessionDep, run_id: int) -> EvalRunDetail:
+    run = await EvalService(session).get_run(run_id)
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="评测记录不存在")
+    return run

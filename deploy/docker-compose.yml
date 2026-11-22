@@ -1,7 +1,12 @@
 # 用法（在 deploy/ 目录下）：
 #   只起数据库（本地开发后端/前端时用）： docker compose up -d postgres
 #   起全套：                             docker compose up -d --build
-#   Langfuse 可观测性在 M8 加入，届时用 --profile observability 启动
+#   加上 Langfuse 可观测性（M8，spec D17）：
+#     在 deploy/.env 写 LANGFUSE_PUBLIC_KEY=pk-lf-local-dev、LANGFUSE_SECRET_KEY=sk-lf-local-dev，然后
+#     docker compose --profile observability up -d --build
+#   打开 http://localhost:3000 ，用 LANGFUSE_INIT_USER_EMAIL / LANGFUSE_INIT_USER_PASSWORD 登录。
+#   不设置这两个 Key 时后端不上报（Langfuse 照样能启动，项目 Key 用下面的本地默认值）。
+#   本文件里 Langfuse 的密码、盐、加密密钥都是本地演示用的默认值，部署到别处必须全部替换。
 
 name: insurance-agent
 
@@ -38,6 +43,10 @@ services:
       LLM__API_KEY: ${LLM_API_KEY:-}
       LLM__BASE_URL: ${LLM_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
       LLM__MODEL: ${LLM_MODEL:-qwen-plus}
+      # LLM 可观测性（M8）：两个 Key 都设置了才上报
+      LANGFUSE__PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE__SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE__HOST: http://langfuse-web:3000
     volumes:
       # 原始 PDF 与解析缓存放在宿主机，容器重建不丢
       - ../data:/data
@@ -62,5 +71,132 @@ services:
       - "${FRONTEND_PORT:-8080}:80"
     restart: unless-stopped
 
+  # ---------- Langfuse v3 自托管（--profile observability）----------
+  # 组件：web + worker，元数据存 Postgres，trace 存 ClickHouse，事件先落 S3（MinIO），队列用 Redis
+
+  langfuse-db:
+    profiles: [observability]
+    image: pgvector/pgvector:pg17  # 复用本机已有镜像；Langfuse 只用普通 Postgres 功能
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: ${LANGFUSE_DB_PASSWORD:-langfuse}
+      POSTGRES_DB: langfuse
+    volumes:
+      - langfuse_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse -d langfuse"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  clickhouse:
+    profiles: [observability]
+    image: clickhouse/clickhouse-server:24.8
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse}
+    volumes:
+      - langfuse_clickhouse_data:/var/lib/clickhouse
+      - langfuse_clickhouse_logs:/var/log/clickhouse-server
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    profiles: [observability]
+    image: redis:7
+    command: ["--requirepass", "${REDIS_AUTH:-langfuse-redis}", "--maxmemory-policy", "noeviction"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_AUTH:-langfuse-redis}", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  minio:
+    profiles: [observability]
+    # minio/minio 已不在 Docker Hub 发布；Langfuse 官方 compose 用的也是这个镜像
+    image: cgr.dev/chainguard/minio:latest
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-langfuse-minio}
+    volumes:
+      - langfuse_minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  langfuse-worker:
+    profiles: [observability]
+    image: langfuse/langfuse-worker:3
+    depends_on: &langfuse-deps
+      langfuse-db:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment: &langfuse-env
+      DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD:-langfuse}@langfuse-db:5432/langfuse
+      SALT: ${LANGFUSE_SALT:-local-dev-salt}
+      # 64 位十六进制；本地演示值
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      TELEMETRY_ENABLED: "false"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-langfuse-minio}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: ${REDIS_AUTH:-langfuse-redis}
+    restart: unless-stopped
+
+  langfuse-web:
+    profiles: [observability]
+    image: langfuse/langfuse:3
+    depends_on: *langfuse-deps
+    ports:
+      - "${LANGFUSE_PORT:-3000}:3000"
+    environment:
+      <<: *langfuse-env
+      NEXTAUTH_URL: http://localhost:${LANGFUSE_PORT:-3000}
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-local-dev-nextauth-secret}
+      # 首次启动自动建好组织、项目、项目 Key 和登录用户（headless init），不用手动点页面
+      LANGFUSE_INIT_ORG_ID: anxinbao
+      LANGFUSE_INIT_ORG_NAME: 安心保
+      LANGFUSE_INIT_PROJECT_ID: insurance-agent
+      LANGFUSE_INIT_PROJECT_NAME: insurance-agent
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-lf-local-dev}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-lf-local-dev}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-admin@local.test}
+      LANGFUSE_INIT_USER_NAME: admin
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-local-dev-password}
+    restart: unless-stopped
+
 volumes:
   postgres_data:
+  langfuse_db_data:
+  langfuse_clickhouse_data:
+  langfuse_clickhouse_logs:
+  langfuse_minio_data:

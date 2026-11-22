@@ -35,6 +35,9 @@ def make_llms(
         "api_key": api_key,
         "timeout": settings.timeout_seconds,
         "max_retries": settings.max_retries,
+        # 流式时也让接口在最后一个分片里返回 token 用量（stream_options.include_usage）。
+        # 对话图用 messages 流模式，图里的每次模型调用都会走流式，不开的话 trace 里用量全是 0
+        "stream_usage": True,
     }
     json_llm = ChatOpenAI(
         **common, temperature=0, model_kwargs={"response_format": {"type": "json_object"}}

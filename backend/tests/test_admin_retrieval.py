@@ -134,5 +134,13 @@ async def test_eval_runs_list_newest_first_without_details(
     assert [r["metrics"]["recall@5"] for r in runs] == [0.95, 0.8]
     assert all("details" not in r for r in runs)
 
+    # 单条记录带逐题结果
+    detail = await client.get(f"/api/v1/admin/eval-runs/{runs[0]['id']}", headers=bearer(token))
+    assert detail.json()["details"] == [{"id": "q1", "rank": 1}]
+    missing = await client.get("/api/v1/admin/eval-runs/999999999", headers=bearer(token))
+    assert missing.status_code == 404
+
     user = await login_as(client, db_session, "eval_user", admin=False)
     assert (await client.get("/api/v1/admin/eval-runs", headers=bearer(user))).status_code == 403
+    one = await client.get(f"/api/v1/admin/eval-runs/{runs[0]['id']}", headers=bearer(user))
+    assert one.status_code == 403

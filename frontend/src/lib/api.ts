@@ -159,6 +159,7 @@ export const adminApi = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  evalRun: (id: number) => request<EvalRun & { details: unknown[] }>(`/api/v1/admin/eval-runs/${id}`),
   evalRuns: (suite?: string) =>
     request<EvalRun[]>(`/api/v1/admin/eval-runs${suite ? `?suite=${encodeURIComponent(suite)}` : ''}`),
 }

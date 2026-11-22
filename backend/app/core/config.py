@@ -115,6 +115,23 @@ class LlmSettings(BaseModel):
         return None if isinstance(v, str) and not v.strip() else v
 
 
+class LangfuseSettings(BaseModel):
+    """LLM 可观测性（spec D17）：两个 Key 都配置了才启用。
+    compose 里未设置的变量是空字符串，按未配置处理。"""
+
+    public_key: str = ""
+    secret_key: SecretStr | None = None
+    host: str = "http://localhost:3000"
+
+    @field_validator("secret_key", mode="before")
+    @classmethod
+    def _blank_as_none(cls, v: object) -> object:
+        return None if isinstance(v, str) and not v.strip() else v
+
+    def enabled(self) -> bool:
+        return bool(self.public_key.strip()) and self.secret_key is not None
+
+
 DEV_JWT_SECRET = "dev-insecure-jwt-secret-change-me-please"
 
 
@@ -138,6 +155,7 @@ class Settings(BaseSettings):
     auth: AuthSettings = AuthSettings()
     rag: RagSettings = RagSettings()
     llm: LlmSettings = LlmSettings()
+    langfuse: LangfuseSettings = LangfuseSettings()
 
     def llm_api_key(self) -> SecretStr | None:
         """对话模型的 Key：没单独配置时复用 DashScope 的 Key（默认模型就在 DashScope 上）。"""

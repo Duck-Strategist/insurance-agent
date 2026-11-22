@@ -39,6 +39,12 @@ uv run python -m app.pricing extract    # 费率表 PDF → app/pricing/rates/*.
 uv run python -m app.manage promote-admin <用户名>
 uv run python -m app.eval retrieval    # 检索三组对照（真实调用 DashScope，约 10 分钟）；参数用环境变量覆盖，如 RAG__RETRIEVAL__FULLTEXT_WEIGHT=0.5
 uv run python -m app.eval generate     # 用 LLM 生成检索题草稿（需人工审核后另存为正式评测集）
+uv run python -m app.eval routing      # 路由评测（默认测试集；调提示词时只跑开发集：... routing ../data/eval/routing_dev.jsonl）
+uv run python -m app.eval e2e          # 端到端评测（qwen-max 当裁判，约 10 分钟），另导出 20% 抽样 CSV 供人工标注
+uv run python -m app.eval agreement ../eval/reports/e2e-<run>-human.csv   # 人工标注后写入裁判与人工一致率
+
+# Langfuse（M8）：在 deploy/.env 写 LANGFUSE_PUBLIC_KEY=pk-lf-local-dev、LANGFUSE_SECRET_KEY=sk-lf-local-dev
+docker compose -f deploy/docker-compose.yml --profile observability up -d --build   # http://localhost:3000
 
 npm run dev                            # :5173，/api 与 /health 代理到 :8000
 ```
@@ -78,6 +84,9 @@ npm run lint ; npx tsc -b ; npm run test ; npm run build
 - 子块向量文本带前缀「条款名｜章节路径」；查询时的分词必须和入库共用 `app.rag.tokenizer.tokenize`。送去重排的文本也带同样的前缀。
 - 检索参数（k、召回条数、权重）只在 `RetrievalSettings` 里改，不接受 LLM 传入。条款过滤：`document_ids=None` 表示不限，空列表表示没有可查的条款（返回空，不能退化成不限）。
 - 改了结构规则、切分或检索参数后重跑 `python -m app.eval retrieval`，和 `eval/README.md` 里的基线对比；简历和文档里的数字必须能在 `eval_runs` 里找到对应记录。
+- **路由测试集只用来报告**（D56）：调路由提示词只看 `routing_dev.jsonl`，测试集的错题不能写进提示词，也不在看到结果后改标签。
+- 评测调用线上同一套函数（`graph.classify` / `resolve_products` / `answer_from_clauses`，D58）；改线上逻辑时不要在评测里另写一份。
+- 端到端的裁判分数在人工一致率测出来之前只能当参考；简历里引用时注明裁判模型和一致率（或「待测」）。
 - 评测集 `data/eval/*.jsonl` 改动后数据集哈希会变，新旧结果不能直接比；手写题的标准章节路径从库里复制，跑评测时会校验路径存在，生成题还会校验原文依据仍在标准章节里（D40）。改了结构规则重新入库后，按依据重新标注生成题的 `gold`，不要只按路径改。
 
 ## Agent 约定

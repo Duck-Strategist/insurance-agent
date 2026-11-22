@@ -16,6 +16,7 @@ from app.api.v1 import api_router
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging, get_logger
 from app.infra.db import Database
+from app.infra.tracing import init_tracing, shutdown_tracing
 from app.rag.factory import RagNotConfiguredError, check_configured, retriever
 from app.rag.tokenizer import tokenize
 
@@ -59,10 +60,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
             else:
                 logger.warning("app.agent_disabled")
-            logger.info("app.startup", env=settings.app.env)
+            tracing = init_tracing(settings.langfuse, settings.app.env)
+            logger.info("app.startup", env=settings.app.env, tracing=tracing)
             try:
                 yield
             finally:
+                shutdown_tracing()
                 await app.state.db.dispose()
                 logger.info("app.shutdown")
 

@@ -50,3 +50,44 @@ def longest_common_substring(a: str, b: str) -> int:
                 best = max(best, cur[j])
         prev = cur
     return best
+
+
+# ---------- 分类（路由评测） ----------
+
+
+def confusion_matrix(
+    gold: Sequence[str], pred: Sequence[str], labels: Sequence[str]
+) -> dict[str, dict[str, int]]:
+    """{标准标签: {预测标签: 次数}}，行列都按 labels 的顺序，没出现的记 0。"""
+    matrix = {g: dict.fromkeys(labels, 0) for g in labels}
+    for g, p in zip(gold, pred, strict=True):
+        matrix[g][p] += 1
+    return matrix
+
+
+def per_label_scores(
+    matrix: dict[str, dict[str, int]],
+) -> dict[str, dict[str, float]]:
+    """每个标签的精确率、召回率、F1、支持数（该标签的标准题数）。分母为 0 时记 0。"""
+    labels = list(matrix)
+    out: dict[str, dict[str, float]] = {}
+    for label in labels:
+        tp = matrix[label][label]
+        predicted = sum(matrix[g][label] for g in labels)
+        support = sum(matrix[label].values())
+        precision = tp / predicted if predicted else 0.0
+        recall = tp / support if support else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+        out[label] = {
+            "precision": round(precision, 4),
+            "recall": round(recall, 4),
+            "f1": round(f1, 4),
+            "support": support,
+        }
+    return out
+
+
+def macro_f1(scores: dict[str, dict[str, float]]) -> float:
+    """只平均有标准题的标签（support > 0）。"""
+    used = [s["f1"] for s in scores.values() if s["support"]]
+    return round(sum(used) / len(used), 4) if used else 0.0

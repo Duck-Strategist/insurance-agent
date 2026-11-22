@@ -2,7 +2,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import EvalRun
-from app.schemas.retrieval import EvalRunOut
+from app.schemas.retrieval import EvalRunDetail, EvalRunOut
 
 
 class EvalService:
@@ -24,3 +24,7 @@ class EvalService:
             stmt = stmt.where(EvalRun.suite == suite)
         rows = await self._session.execute(stmt.limit(limit))
         return [EvalRunOut.model_validate(r, from_attributes=True) for r in rows.all()]
+
+    async def get_run(self, run_id: int) -> EvalRunDetail | None:
+        run = await self._session.get(EvalRun, run_id)
+        return EvalRunDetail.model_validate(run, from_attributes=True) if run else None

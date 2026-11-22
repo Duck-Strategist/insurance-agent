@@ -19,7 +19,7 @@
 import asyncio
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import Annotated, Any, Literal, Protocol, TypedDict
@@ -345,6 +345,114 @@ def _who(insured: str) -> str:
     return "被保险人" if insured == "other" else "您" + INSURED_LABELS[insured]
 
 
+@dataclass
+class RouteDecision:
+    intent: str
+    product_ids: list[int]  # 已校验：都在产品目录里
+    parsed: bool  # 模型输出能解析且意图合法；False 时意图是兜底的 clause_qa
+    by_rule: bool = False  # 寒暄规则命中，没有调用模型
+
+
+async def classify(
+    json_llm: BaseChatModel,
+    catalog: Sequence[ProductRef],
+    question: str,
+    *,
+    history: str = "（无）",
+    last_workflow: str | None = None,
+    last_products: Sequence[int] = (),
+    config: RunnableConfig | None = None,
+) -> RouteDecision:
+    """意图路由：寒暄走规则，其余交给模型，产品 id 由代码校验。
+    对话图的 route 节点和路由评测（app.eval routing）共用这一个函数。"""
+    if GREETING.match(question):
+        return RouteDecision("chitchat", [], parsed=True, by_rule=True)
+    valid_ids = {p["id"] for p in catalog}
+    prompt = prompts.ROUTER.format(
+        products="\n".join(f"- {p['id']}：{p['name']}" for p in catalog) or "（无）",
+        last_workflow=last_workflow or "无",
+        last_products=list(last_products) or "无",
+        history=history,
+        question=question,
+    )
+    resp = await json_llm.ainvoke([HumanMessage(content=prompt)], config=config)
+    data = parse_json_object(str(resp.content))
+    intent = data.get("intent")
+    parsed = intent in INTENTS
+    if not parsed:
+        # 解析失败：落到条款问答，最多多问一句"哪款产品"
+        logger.warning("agent.route_unparsed", raw=str(resp.content)[:200])
+        intent = "clause_qa"
+    # LLM 只能从候选里选：不是整数、不在目录里的 id 一律丢弃（防编造）
+    product_ids = [i for i in _as_ids(data.get("product_ids")) if i in valid_ids]
+    return RouteDecision(str(intent), product_ids, parsed)
+
+
+def resolve_products(
+    decision: RouteDecision, last_workflow: str | None, last_products: Sequence[int]
+) -> tuple[list[int], bool]:
+    """路由后的产品：这句没提产品、且还在同一个业务里追问时，沿用上一轮的产品。
+    返回 (产品 id, 是否沿用)。route 节点和路由评测共用。"""
+    if (
+        not decision.product_ids
+        and decision.intent in ("clause_qa", "claim")
+        and last_workflow == decision.intent
+        and last_products
+    ):
+        return list(last_products), True
+    return decision.product_ids, False
+
+
+@dataclass
+class ClauseAnswer:
+    content: str
+    citations: list[dict[str, Any]]
+    hits: list[Hit]
+
+
+async def answer_from_clauses(
+    retriever: SearchBackend,
+    answer_llm: BaseChatModel,
+    question: str,
+    query: str,
+    document_ids: Sequence[int],
+    context_chars: int,
+    on_status: Callable[[str], None] = lambda _: None,
+    config: RunnableConfig | None = None,
+) -> ClauseAnswer | None:
+    """检索 + 带引用生成；检索不到返回 None。对话图的 answer 节点和端到端评测共用。"""
+    # 改写后的查询为主（重排用它），原问题一起召回：改写会丢掉与条款原文一致的措辞（spec D39）
+    alt = [question] if question != query else []
+    try:
+        result = await retriever.search(
+            query, mode=SearchMode.HYBRID_RERANK, document_ids=document_ids, alt_queries=alt
+        )
+    except RerankError as exc:
+        # 重排服务故障时退化为不重排的混合检索，回答质量略降但不中断对话
+        logger.warning("agent.rerank_failed", error=str(exc))
+        result = await retriever.search(
+            query, mode=SearchMode.HYBRID, document_ids=document_ids, alt_queries=alt
+        )
+    hits = result.hits
+    if not hits:
+        return None
+    on_status("正在生成回答…")
+    asked = question if query == question else f"{question}\n（结合上下文理解为：{query}）"
+    resp = await answer_llm.ainvoke(
+        [
+            SystemMessage(content=prompts.ANSWER_SYSTEM),
+            HumanMessage(
+                content=prompts.ANSWER_USER.format(
+                    sections=format_sections(hits, context_chars), n=len(hits), question=asked
+                )
+            ),
+        ],
+        config=config,
+    )
+    content = str(resp.content)
+    return ClauseAnswer(content, extract_citations(content, hits), hits)
+
+
 def reply(text_: str, **updates: Any) -> dict[str, Any]:
     """固定话术：通过 custom 流整段发给前端，并写入对话历史。"""
     get_stream_writer()({"type": "token", "text": text_})
@@ -360,34 +468,22 @@ def build_graph(
     cfg = deps.settings
 
     async def route(state: AgentState) -> dict[str, Any]:
-        question = last_question(state)
         catalog = await load_catalog(deps.session_factory)
-        if GREETING.match(question):
-            return {"intent": "chitchat", "catalog": catalog}
-
         valid_ids = {p["id"] for p in catalog}
         last_workflow = state.get("last_workflow")
         last_products = [i for i in state.get("product_ids", []) if i in valid_ids]
-        prompt = prompts.ROUTER.format(
-            products="\n".join(f"- {p['id']}：{p['name']}" for p in catalog) or "（无）",
-            last_workflow=last_workflow or "无",
-            last_products=last_products or "无",
+        decision = await classify(
+            deps.json_llm,
+            catalog,
+            last_question(state),
             history=format_history(state["messages"], cfg.history_turns),
-            question=question,
+            last_workflow=last_workflow,
+            last_products=last_products,
         )
-        resp = await deps.json_llm.ainvoke([HumanMessage(content=prompt)])
-        data = parse_json_object(str(resp.content))
-
-        intent = data.get("intent")
-        if intent not in INTENTS:
-            # 解析失败：落到唯一已实现的业务，最多多问一句"哪款产品"
-            logger.warning("agent.route_unparsed", raw=str(resp.content)[:200])
-            intent = "clause_qa"
-        # LLM 只能从候选里选：不是整数、不在目录里的 id 一律丢弃（防编造）
-        product_ids = [i for i in _as_ids(data.get("product_ids")) if i in valid_ids]
-        reused = False
-        if not product_ids and intent in ("clause_qa", "claim") and last_workflow == intent:
-            product_ids, reused = last_products, bool(last_products)
+        if decision.by_rule:
+            return {"intent": decision.intent, "catalog": catalog}
+        intent = decision.intent
+        product_ids, reused = resolve_products(decision, last_workflow, last_products)
         logger.info("agent.route", intent=intent, product_ids=product_ids)
         return {
             "intent": intent,
@@ -456,38 +552,18 @@ def build_graph(
             }
         )
         writer({"type": "status", "text": "正在检索条款…"})
-        # 改写后的查询为主（重排用它），原问题一起召回：改写会丢掉与条款原文一致的措辞（spec D39）
-        alt = [question] if question != query else []
-        try:
-            result = await deps.retriever.search(
-                query, mode=SearchMode.HYBRID_RERANK, document_ids=doc_ids, alt_queries=alt
-            )
-        except RerankError as exc:
-            # 重排服务故障时退化为不重排的混合检索，回答质量略降但不中断对话
-            logger.warning("agent.rerank_failed", error=str(exc))
-            result = await deps.retriever.search(
-                query, mode=SearchMode.HYBRID, document_ids=doc_ids, alt_queries=alt
-            )
-        hits = result.hits
-        if not hits:
-            return reply(prompts.NOT_FOUND, last_workflow="clause_qa", query="")
-
-        writer({"type": "status", "text": "正在生成回答…"})
-        asked = question if query == question else f"{question}\n（结合上下文理解为：{query}）"
-        resp = await deps.answer_llm.ainvoke(
-            [
-                SystemMessage(content=prompts.ANSWER_SYSTEM),
-                HumanMessage(
-                    content=prompts.ANSWER_USER.format(
-                        sections=format_sections(hits, cfg.context_chars_per_section),
-                        n=len(hits),
-                        question=asked,
-                    )
-                ),
-            ]
+        result = await answer_from_clauses(
+            deps.retriever,
+            deps.answer_llm,
+            question,
+            query,
+            doc_ids,
+            cfg.context_chars_per_section,
+            on_status=lambda text_: writer({"type": "status", "text": text_}),
         )
-        content = str(resp.content)
-        citations = extract_citations(content, hits)
+        if result is None:
+            return reply(prompts.NOT_FOUND, last_workflow="clause_qa", query="")
+        content, citations = result.content, result.citations
         writer({"type": "citations", "items": citations})
         return {
             "messages": [AIMessage(content=content, additional_kwargs={"citations": citations})],

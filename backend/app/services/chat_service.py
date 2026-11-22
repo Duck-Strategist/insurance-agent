@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.graph import AgentState
 from app.agent.runtime import AgentRuntime
 from app.core.logging import get_logger
+from app.infra.tracing import trace_config
 from app.models import ChatThread
 from app.schemas.chat import ChatMessageOut, ThreadOut
 
@@ -165,10 +166,12 @@ async def _stream(
 ) -> AsyncIterator[str]:
     """图的执行过程转成 SSE 事件（事件类型见 CUSTOM_EVENTS，另有 token / done / error）。"""
     try:
+        config: RunnableConfig = {
+            **trace_config("chat", user_id=user_id, session_id=thread_id, tags=["chat"]),
+            **thread_config(thread_id, user_id),
+        }
         async for item in runtime.graph.astream(
-            payload,
-            thread_config(thread_id, user_id),
-            stream_mode=["messages", "custom"],
+            payload, config, stream_mode=["messages", "custom"]
         ):
             # 多种 stream_mode 时每项是 (模式, 数据)
             mode, data = cast(tuple[str, Any], item)

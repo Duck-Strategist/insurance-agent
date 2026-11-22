@@ -1,0 +1,51 @@
+{"id": "rd-001", "question": "达尔文12号的保障期间可以选到 70 岁吗", "intent": "clause_qa", "products": ["达尔文12号重大疾病保险"], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-002", "question": "众安尊享e生特殊门诊包括什么", "intent": "clause_qa", "products": ["众安尊享e生百万医疗险2026版"], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-003", "question": "小蜜蜂6号的意外医疗报销比例", "intent": "clause_qa", "products": ["太平洋小蜜蜂6号综合意外险"], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-004", "question": "医联有盟的身故责任是必选的吗", "intent": "clause_qa", "products": ["复星联合医联有盟重疾险"], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-005", "question": "福有余2025可以加保吗", "intent": "clause_qa", "products": ["太保福有余2025"], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-006", "question": "星相守2号转保版和个人版有什么区别", "intent": "clause_qa", "products": ["复星联合星相守2号长期医疗险（转保版）", "复星联合星相守2号长期医疗险（个人版）"], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-007", "question": "小学童2号Pro住院津贴怎么算", "intent": "clause_qa", "products": ["人保小学童2号Pro学平险"], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-008", "question": "E增福优享版的投保年龄", "intent": "clause_qa", "products": ["新华人寿E增福优享版"], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-009", "question": "达尔文宝贝12号先天性疾病保不保", "intent": "clause_qa", "products": ["达尔文宝贝计划12号"], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-010", "question": "玫瑰版小蜜蜂有什么特色保障", "intent": "clause_qa", "products": ["太平洋小蜜蜂6号玫瑰版综合意外险"], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-011", "question": "保险合同什么时候生效", "intent": "clause_qa", "products": [], "history": [], "last_workflow": null, "last_products": [], "tags": ["无产品"]}
+{"id": "rd-012", "question": "等待期内出险怎么办", "intent": "clause_qa", "products": [], "history": [], "last_workflow": null, "last_products": [], "tags": ["无产品"]}
+{"id": "rd-013", "question": "免责条款都有哪些常见的", "intent": "clause_qa", "products": [], "history": [], "last_workflow": null, "last_products": [], "tags": ["无产品"]}
+{"id": "rd-014", "question": "什么叫保证续保", "intent": "clause_qa", "products": [], "history": [], "last_workflow": null, "last_products": [], "tags": ["无产品"]}
+{"id": "rd-015", "question": "那它的免赔额呢", "intent": "clause_qa", "products": ["众安尊享e生百万医疗险2026版"], "history": [["user", "众安尊享e生保证续保吗"], ["assistant", "保证续保期间为 20 年[1]……"]], "last_workflow": "clause_qa", "last_products": ["众安尊享e生百万医疗险2026版"], "tags": ["多轮"]}
+{"id": "rd-016", "question": "众安尊享e生2026版", "intent": "clause_qa", "products": ["众安尊享e生百万医疗险2026版"], "history": [["user", "等待期多久"], ["assistant", "请问您想了解哪款产品的条款？目前可以查询：众安尊享e生百万医疗险2026版、达尔文12号重大疾病保险……"]], "last_workflow": "clause_qa", "last_products": [], "tags": ["只回产品名", "多轮"]}
+{"id": "rd-017", "question": "那福满佳呢", "intent": "clause_qa", "products": ["中英人寿福满佳C款（悦享版）"], "history": [["user", "福有余2025能保单贷款吗"], ["assistant", "可以申请保单贷款[1]……"]], "last_workflow": "clause_qa", "last_products": ["太保福有余2025"], "tags": ["换产品", "多轮"]}
+{"id": "rd-018", "question": "我 40 岁，想买份重疾，预算八千", "intent": "advisor", "products": [], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-019", "question": "帮我女儿配保险，她 3 岁", "intent": "advisor", "products": [], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-020", "question": "医联有盟 35 岁男一年交多少", "intent": "advisor", "products": [], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-021", "question": "给我推荐个性价比高的组合", "intent": "advisor", "products": [], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-022", "question": "想给自己买份意外险", "intent": "advisor", "products": [], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-023", "question": "一家三口怎么配保险", "intent": "advisor", "products": [], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-024", "question": "预算两千够买什么", "intent": "advisor", "products": [], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-025", "question": "有没有不用体检就能买的医疗险推荐", "intent": "advisor", "products": [], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-026", "question": "帮我对比一下达尔文和医联哪个便宜", "intent": "advisor", "products": [], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-027", "question": "我适合买寿险吗", "intent": "advisor", "products": [], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-028", "question": "没社保，预算六千", "intent": "advisor", "products": [], "history": [["user", "帮我配一份保险，我30岁"], ["assistant", "已了解：30 周岁。为了给您配置合适的方案，还需要了解：性别、是否有社保（医保）、每年大概能接受的保费预算。"]], "last_workflow": "advisor", "last_products": [], "tags": ["补充信息", "多轮"]}
+{"id": "rd-029", "question": "男的", "intent": "advisor", "products": [], "history": [["user", "帮我配一份保险，我30岁"], ["assistant", "已了解：30 周岁。为了给您配置合适的方案，还需要了解：性别、是否有社保（医保）、每年大概能接受的保费预算。"]], "last_workflow": "advisor", "last_products": [], "tags": ["补充信息", "多轮"]}
+{"id": "rd-030", "question": "去掉重疾险", "intent": "advisor", "products": [], "history": [["user", "30岁女有社保预算5000"], ["assistant", "为您配置了医疗险、重疾险和意外险……"]], "last_workflow": "advisor", "last_products": [], "tags": ["调整方案", "多轮"]}
+{"id": "rd-031", "question": "我得了肺炎住院一周，众安能赔吗", "intent": "claim", "products": ["众安尊享e生百万医疗险2026版"], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-032", "question": "孩子被开水烫伤了，学平险怎么报", "intent": "claim", "products": [], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-033", "question": "确诊白血病，达尔文宝贝12号怎么申请", "intent": "claim", "products": ["达尔文宝贝计划12号"], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-034", "question": "我住院出院小结要盖章吗", "intent": "claim", "products": [], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-035", "question": "车祸骨折，小蜜蜂能报医药费吗", "intent": "claim", "products": ["太平洋小蜜蜂6号综合意外险"], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-036", "question": "我爸做了心脏支架，能理赔吗", "intent": "claim", "products": [], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-037", "question": "理赔一般多久能下来", "intent": "claim", "products": [], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-038", "question": "住院了想报销，该找谁", "intent": "claim", "products": [], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-039", "question": "买的是达尔文12号", "intent": "claim", "products": ["达尔文12号重大疾病保险"], "history": [["user", "我确诊了癌症能赔吗"], ["assistant", "为了按您的保单条款判断，需要先知道您投保的是哪款产品。目前可以查询条款的产品有：……"]], "last_workflow": "claim", "last_products": [], "tags": ["只回产品名", "多轮"]}
+{"id": "rd-040", "question": "我真的住院了，刚办完入院", "intent": "claim", "products": ["复星联合星相守2号长期医疗险（个人版）"], "history": [["user", "星相守2号住院怎么报"], ["assistant", "住院医疗费用扣除免赔额后赔付[1]……"]], "last_workflow": "clause_qa", "last_products": ["复星联合星相守2号长期医疗险（个人版）"], "tags": ["跨业务", "边界", "多轮"]}
+{"id": "rd-041", "question": "您好", "intent": "chitchat", "products": [], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-042", "question": "多谢", "intent": "chitchat", "products": [], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-043", "question": "你会干什么", "intent": "chitchat", "products": [], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-044", "question": "嗯嗯好的", "intent": "chitchat", "products": [], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-045", "question": "你好呀，介绍一下你自己", "intent": "chitchat", "products": [], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-046", "question": "明天会下雨吗", "intent": "other", "products": [], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-047", "question": "怎么减肥", "intent": "other", "products": [], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-048", "question": "汽车保险怎么买划算", "intent": "other", "products": [], "history": [], "last_workflow": null, "last_products": [], "tags": ["边界"]}
+{"id": "rd-049", "question": "推荐几本书", "intent": "other", "products": [], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-050", "question": "个税怎么算", "intent": "other", "products": [], "history": [], "last_workflow": null, "last_products": [], "tags": []}
+{"id": "rd-051", "question": "养老金能领多少", "intent": "other", "products": [], "history": [], "last_workflow": null, "last_products": [], "tags": ["边界"]}

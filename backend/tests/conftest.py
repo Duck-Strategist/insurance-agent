@@ -16,6 +16,9 @@ import tempfile
 os.environ["RAG__MINERU_TOKEN"] = ""
 os.environ["RAG__DASHSCOPE_API_KEY"] = ""
 os.environ["LLM__API_KEY"] = ""
+# 不往本机的 Langfuse 上报测试里的假对话
+os.environ["LANGFUSE__PUBLIC_KEY"] = ""
+os.environ["LANGFUSE__SECRET_KEY"] = ""
 os.environ["RAG__DATA_DIR"] = tempfile.mkdtemp(prefix="insurance-agent-test-")
 
 import asyncio  # noqa: E402
