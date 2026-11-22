@@ -34,6 +34,10 @@ services:
       RAG__DATA_DIR: /data
       RAG__MINERU_TOKEN: ${MINERU_TOKEN:-}
       RAG__DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      # 对话模型（M4）：不设置时用 DashScope qwen-plus 并复用上面的 Key
+      LLM__API_KEY: ${LLM_API_KEY:-}
+      LLM__BASE_URL: ${LLM_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      LLM__MODEL: ${LLM_MODEL:-qwen-plus}
     volumes:
       # 原始 PDF 与解析缓存放在宿主机，容器重建不丢
       - ../data:/data

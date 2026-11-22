@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.config import RetrievalSettings
 from app.eval import metrics as M
 from app.eval.dataset import RetrievalItem
-from app.models import Document, EvalRun
+from app.models import Document, EvalRun, Product
 from app.rag.retriever import Retriever, SearchMode
 
 Scope = Literal["document", "global"]
@@ -30,11 +30,13 @@ class ItemResult:
     rank: int | None
     timings: dict[str, float]
     retrieved: list[tuple[str, list[str]]]  # (条款, 章节路径)，按名次
+    query: str  # 实际检索用的查询（开启改写时与原问题不同）
 
     def as_detail(self) -> dict[str, Any]:
         return {
             "id": self.item.id,
             "question": self.item.question,
+            **({"query": self.query} if self.query != self.item.question else {}),
             "file_name": self.item.file_name,
             "gold": self.item.gold,
             "rank": self.rank,
@@ -61,19 +63,26 @@ async def evaluate(
     doc_ids: dict[str, int],
     vectors: dict[str, list[float]],
     embed_ms: dict[str, float],
+    queries: dict[str, str] | None = None,
+    alt_vectors: dict[str, list[float]] | None = None,
 ) -> dict[SearchMode, list[ItemResult]]:
+    """queries：题目 id → 检索用的查询（查询改写的结果）；不传则用原问题。
+    alt_vectors：给出时把原问题作为补充查询一起召回（与线上对话一致，spec D39）。"""
     missing = sorted({i.file_name for i in items} - doc_ids.keys())
     if missing:
         raise ValueError(f"评测集引用的条款未入库：{missing}")
     out: dict[SearchMode, list[ItemResult]] = {m: [] for m in modes}
     for item in items:
         for mode in modes:
+            query = (queries or {}).get(item.id, item.question)
             res = await retriever.search(
-                item.question,
+                query,
                 mode=mode,
                 document_ids=[doc_ids[item.file_name]] if scope == "document" else None,
                 top_k=EVAL_TOP_K,
                 query_vector=vectors[item.id],
+                alt_queries=[item.question] if alt_vectors is not None else (),
+                alt_vectors=[alt_vectors[item.id]] if alt_vectors is not None else None,
             )
             # 查询向量是预先算好传进去的：检索器内部的 embed_ms 约为 0，
             # 换成预先测得的向量化耗时，总耗时 = 向量化 + 检索器内部的墙钟时间（不含向量化）
@@ -83,7 +92,7 @@ async def evaluate(
             )
             retrieved = [(h.file_name, h.section_path) for h in res.hits]
             rank = M.first_hit_rank([(f, tuple(p)) for f, p in retrieved], item.gold_keys())  # type: ignore[arg-type]
-            out[mode].append(ItemResult(item, rank, timings, retrieved))
+            out[mode].append(ItemResult(item, rank, timings, retrieved, query))
     return out
 
 
@@ -154,3 +163,18 @@ async def save_runs(
             await session.flush()
             saved[mode] = (run.id, metrics)
     return saved
+
+
+async def product_names_by_file(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> dict[str, list[str]]:
+    """条款文件名 → 使用这份条款的产品名（改写提示词里要写产品名，和线上一致）。"""
+    async with session_factory() as session:
+        rows = await session.execute(
+            select(Product.clause_file, Product.name).where(Product.clause_file.is_not(None))
+        )
+        names: dict[str, list[str]] = defaultdict(list)
+        for file_name, name in rows.tuples().all():
+            if file_name:
+                names[file_name].append(name)
+        return dict(names)

@@ -146,3 +146,38 @@ export interface EvalRun {
   metrics: Partial<RetrievalMetrics> & Record<string, unknown>
   created_at: string
 }
+
+// ---- 对话 ----
+
+export interface ChatThread {
+  id: string
+  title: string
+  created_at: string
+  updated_at: string
+}
+
+/** 回答引用的条款章节；index 对应回答正文里的 [n] */
+export interface Citation {
+  index: number
+  document_id: number
+  doc_title: string
+  section_path: string[]
+  snippet: string
+  parent_content: string
+}
+
+export interface ChatMessage {
+  id: string | null
+  role: 'user' | 'assistant'
+  content: string
+  citations: Citation[]
+}
+
+/** 对话接口的 SSE 事件 */
+export type ChatEvent =
+  | { type: 'thread'; id: string; title: string }
+  | { type: 'status'; text: string }
+  | { type: 'token'; text: string }
+  | { type: 'citations'; items: Citation[] }
+  | { type: 'done' }
+  | { type: 'error'; message: string }

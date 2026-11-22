@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.agent.runtime import agent_runtime
 from app.api import health
 from app.api.v1 import api_router
 from app.core.config import Settings, get_settings
@@ -50,6 +51,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
                 # jieba 首次分词要加载词典（约 1 秒）：启动时在线程里预热，不让第一个检索请求卡住
                 await anyio.to_thread.run_sync(tokenize, "预热分词词典")
+            # 对话图（M4）：依赖检索器和对话模型 Key，缺一个就不启用，对话接口返回 503
+            app.state.agent = None
+            if app.state.retriever is not None and settings.llm_api_key() is not None:
+                app.state.agent = await stack.enter_async_context(
+                    agent_runtime(settings, app.state.db.session_factory, app.state.retriever)
+                )
+            else:
+                logger.warning("app.agent_disabled")
             logger.info("app.startup", env=settings.app.env)
             try:
                 yield

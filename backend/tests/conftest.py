@@ -15,6 +15,7 @@ import tempfile
 # 密钥置空（视为未配置），数据目录指向临时目录。需要"已配置"的测试自己显式构造 RagSettings。
 os.environ["RAG__MINERU_TOKEN"] = ""
 os.environ["RAG__DASHSCOPE_API_KEY"] = ""
+os.environ["LLM__API_KEY"] = ""
 os.environ["RAG__DATA_DIR"] = tempfile.mkdtemp(prefix="insurance-agent-test-")
 
 from collections.abc import AsyncIterator  # noqa: E402

@@ -21,6 +21,16 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
+
+# LangGraph 的 checkpointer 自己建表、自己做迁移（AsyncPostgresSaver.setup），不归 Alembic 管；
+# 不排除的话 autogenerate 会把它们当成多余的表生成 DROP
+LANGGRAPH_TABLES = {"checkpoints", "checkpoint_blobs", "checkpoint_writes", "checkpoint_migrations"}
+
+
+def include_name(name: str | None, type_: str, parent_names: object) -> bool:
+    return not (type_ == "table" and name in LANGGRAPH_TABLES)
+
+
 DB_URL = get_settings().db.url.get_secret_value()
 
 
@@ -30,6 +40,7 @@ def run_migrations_offline() -> None:
         url=DB_URL,
         target_metadata=target_metadata,
         literal_binds=True,
+        include_name=include_name,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
     )
@@ -42,6 +53,7 @@ def do_run_migrations(connection: Connection) -> None:
         connection=connection,
         target_metadata=target_metadata,
         compare_type=True,
+        include_name=include_name,
         # 让 autogenerate 也能发现 server_default 的变化
         compare_server_default=True,
     )

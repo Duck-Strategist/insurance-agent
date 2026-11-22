@@ -2,7 +2,7 @@
 
 安心保 · 智能保险顾问：RAG + LangGraph 的保险顾问 Agent（学习 + 面试作品项目）。
 
-- 设计与决策：[docs/SPEC.md](docs/SPEC.md)（决策 D1–D35、里程碑 M0–M9、风险 Q1–Q15）。做设计取舍前先查，取舍定了就补一条决策。
+- 设计与决策：[docs/SPEC.md](docs/SPEC.md)（决策 D1–D39、里程碑 M0–M9、风险 Q1–Q17）。做设计取舍前先查，取舍定了就补一条决策。
 - 面试故事集：[docs/INTERVIEW.md](docs/INTERVIEW.md)。每个里程碑结束后补充（见「工作流程」）。
 - 参考实现 `../hm-insurance/` 是教学项目，只读对照，不复制代码，它的 `.env` 里有泄露过的密钥，不要使用。
 
@@ -10,7 +10,8 @@
 
 | 目录 | 内容 |
 |---|---|
-| `backend/app/api/v1/` | 路由（auth、products、admin：条款管理、检索调试、评测记录），依赖在 `app/api/deps.py` |
+| `backend/app/api/v1/` | 路由（auth、products、chat：会话与 SSE 问答、admin：条款管理、检索调试、评测记录），依赖在 `app/api/deps.py` |
+| `backend/app/agent/` | LangGraph 对话图（graph）、提示词（prompts）、模型（llm）、运行时组装与 checkpointer（runtime） |
 | `backend/app/services/` | 业务逻辑；路由不直接写 SQL |
 | `backend/app/models/` | ORM 模型；新模型必须在 `models/__init__.py` 导入，否则 Alembic 看不到 |
 | `backend/app/rag/` | 入库流水线：parser → structure → chunker → embedder → pipeline；检索：retriever（+ reranker） |
@@ -50,7 +51,8 @@ npm run lint ; npx tsc -b ; npm run test ; npm run build
 ## 本机环境（Windows）
 
 - 本机装了原生 PostgreSQL 占用 5432，容器映射到主机 **5433**（`DB__URL` 默认值已是 5433）。镜像用 `pgvector/pgvector:pg17`。
-- 密钥只放 `backend/.env`（已 gitignore）：`RAG__MINERU_TOKEN`、`RAG__DASHSCOPE_API_KEY`。不要打印、提交或写进日志。
+- 密钥只放 `backend/.env`（已 gitignore）：`RAG__MINERU_TOKEN`、`RAG__DASHSCOPE_API_KEY`、`LLM__API_KEY`（可选）。不要打印、提交或写进日志；查看 `.env` 时只看键名（`sed 's/=.*/=***/'`），不要 grep 出值。
+- psycopg 的异步连接不支持 Windows 默认的 ProactorEventLoop：本机跑 uvicorn 要带 `--reload`（会用 SelectorEventLoop），否则对话退化为内存 checkpointer（日志 `agent.checkpointer_in_memory`）。
 - 命令行输出中文前设 `PYTHONIOENCODING=utf-8`；Git Bash 会把 `/health` 这类参数改写成 Windows 路径，用 curl 时设 `MSYS_NO_PATHCONV=1`。
 - `alembic.ini` 必须保持纯 ASCII：Windows 上按 GBK 读取，写中文注释会直接报错。
 - Docker Hub 拉镜像很慢，优先复用本机已有镜像。
@@ -76,12 +78,24 @@ npm run lint ; npx tsc -b ; npm run test ; npm run build
 - 改了结构规则、切分或检索参数后重跑 `python -m app.eval retrieval`，和 `eval/README.md` 里的基线对比；简历和文档里的数字必须能在 `eval_runs` 里找到对应记录。
 - 评测集 `data/eval/*.jsonl` 改动后数据集哈希会变，新旧结果不能直接比；手写题的标准章节路径从库里复制，跑评测时会校验路径存在。
 
+## Agent 约定
+
+- LLM 只做「理解与表达」：意图、改写查询、组织回答。产品 id 必须在候选目录里（代码校验）、查哪份条款由代码根据产品决定、检索参数不暴露给 LLM（spec §6.3）。
+- 路由、改写用 JSON 模式 + `parse_json_object` 自己解析，不用函数调用（各家兼容接口支持不一致，测试里假模型也能直接返回 JSON）；解析失败要有兜底，不能让整轮失败。
+- 回答的引用由代码从正文 `[n]` 解析，只保留本轮检索到的编号；前端也只把有效编号渲染成可点击标记。
+- 流式输出：回答 token 只转发 `answer` 节点里的 `AIMessageChunk`（节点返回的完整 AIMessage 也会出现在 messages 流里）；状态、引用、固定话术走 `get_stream_writer()`。
+- 改了提示词要在真实模型上跑对话验证；影响检索的改动（改写提示词）要跑 `python -m app.eval retrieval --rewrite --keep-original`。
+- **提示词里的示例不能取自评测集**（包括看过的失败案例）：曾把难题集错题的口语→术语映射写进改写提示词，难题集 R@5 虚高到 0.971，去掉后只有 0.912，比不改写还差（spec Q16）。
+- 测试用 `tests/test_agent.py` 的 `make_runtime`（脚本化假 LLM + 假检索器 + InMemorySaver）。
+- checkpointer 的表由 `AsyncPostgresSaver.setup()` 管理，`migrations/env.py` 的 `include_name` 把它们排除在 Alembic 之外。
+
 ## 前端约定
 
 - 所有请求走 `src/lib/api.ts` 的 `request()`（自动带 token、401 自动退出、转换错误信息）。只有字符串请求体才加 JSON Content-Type，FormData 不能手动设。
 - 属于当前用户的数据，queryKey 必须以 `USER_SCOPE`（`src/lib/queryKeys.ts`）开头，登录身份变化时会被统一清掉。
 - 非组件的工具函数放 `src/lib/`，不要从页面文件导出（react-refresh lint）。
 - 筛选、页码等放 URL 参数；跳转回来源页用 `safeRedirect`。
+- 对话流式状态放 `stores/chat.ts`（Zustand），历史消息放 TanStack Query；SSE 用 `chatApi.stream`（fetch + `lib/sse.ts`，带 JWT），不用 EventSource。
 
 ## 测试约定
 

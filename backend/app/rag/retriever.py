@@ -117,8 +117,16 @@ class Retriever:
         document_ids: Sequence[int] | None = None,
         top_k: int | None = None,
         query_vector: list[float] | None = None,
+        alt_queries: Sequence[str] = (),
+        alt_vectors: Sequence[list[float]] | None = None,
     ) -> SearchResult:
-        """document_ids 为 None 表示不限条款；空列表表示没有可查的条款，直接返回空。"""
+        """document_ids 为 None 表示不限条款；空列表表示没有可查的条款，直接返回空。
+
+        alt_queries：补充查询（如改写前的原问题）。每个查询各自做两路召回，全部名次一起 RRF 融合；
+        重排只用主查询 query。改写能补上口语和术语之间的鸿沟，但会丢掉原问题里与条款原文一致的措辞，
+        两个一起召回取长补短（spec D39）。
+        """
+        alt_queries = [q for q in dict.fromkeys(alt_queries) if q and q != query]
         cfg = self._settings
         top_k = top_k or cfg.top_k
         timings: dict[str, float] = {}
@@ -128,20 +136,40 @@ class Retriever:
             raise ValueError("未配置重排模型，不能使用 hybrid_rerank")
 
         start = t0 = time.perf_counter()
+        # 需要现算的向量一次请求算完（主查询 + 补充查询）
+        need = ([] if query_vector is not None else [query]) + (
+            [] if alt_vectors is not None else list(alt_queries)
+        )
+        computed = await self._embedder.embed(need) if need else []
         if query_vector is None:
-            query_vector = (await self._embedder.embed([query]))[0]
+            query_vector, computed = computed[0], computed[1:]
+        vectors = list(alt_vectors) if alt_vectors is not None else computed
+        if len(vectors) != len(alt_queries):
+            raise ValueError("alt_vectors 与 alt_queries 数量不一致")
         timings["embed_ms"] = _ms(t0)
+        all_queries = [(query, query_vector), *zip(alt_queries, vectors, strict=True)]
 
         t0 = time.perf_counter()
         async with self._sessions() as session:
-            vector_ids = await self._vector_recall(session, query_vector, document_ids)
+            rankings: list[list[int]] = []
+            weights: list[float] = []
+            vector_ids: list[int] = []
             fulltext_ids: list[int] = []
-            if mode is SearchMode.VECTOR:
+            for q, vec in all_queries:
+                v_ids = await self._vector_recall(session, vec, document_ids)
+                rankings.append(v_ids)
+                weights.append(1.0)
+                vector_ids += [c for c in v_ids if c not in vector_ids]
+                if mode is not SearchMode.VECTOR:
+                    f_ids = await self._fulltext_recall(session, q, document_ids)
+                    rankings.append(f_ids)
+                    weights.append(cfg.fulltext_weight)
+                    fulltext_ids += [c for c in f_ids if c not in fulltext_ids]
+            if mode is SearchMode.VECTOR and len(rankings) == 1:
                 # 向量距离已经是排序依据；分数用 RRF 同样的公式，便于和其他模式比较
-                ranked = [(cid, 1.0 / (cfg.rrf_k + i)) for i, cid in enumerate(vector_ids, 1)]
+                ranked = [(cid, 1.0 / (cfg.rrf_k + i)) for i, cid in enumerate(rankings[0], 1)]
             else:
-                fulltext_ids = await self._fulltext_recall(session, query, document_ids)
-                ranked = rrf_fuse([vector_ids, fulltext_ids], cfg.rrf_k, [1.0, cfg.fulltext_weight])
+                ranked = rrf_fuse(rankings, cfg.rrf_k, weights)
             if mode is SearchMode.HYBRID_RERANK:
                 ranked = ranked[: cfg.rerank_candidates]
             rows = await self._load_children(session, [cid for cid, _ in ranked])
@@ -193,6 +221,10 @@ class Retriever:
 
     async def embed_query(self, query: str) -> list[float]:
         return (await self._embedder.embed([query]))[0]
+
+    async def embed_queries(self, queries: list[str]) -> list[list[float]]:
+        """一次请求算多条查询的向量（主查询 + 补充查询）。"""
+        return await self._embedder.embed(queries)
 
     # ---- 召回 ----
 

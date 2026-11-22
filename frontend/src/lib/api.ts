@@ -1,7 +1,11 @@
 /** 统一的请求封装：注入 JWT、把后端错误转成 ApiError、401 时清除登录态。 */
 
 import { useAuthStore } from '../stores/auth'
+import { readSse } from './sse'
 import type {
+  ChatEvent,
+  ChatMessage,
+  ChatThread,
   ClauseDocument,
   EvalRun,
   Page,
@@ -39,7 +43,8 @@ async function errorMessage(response: Response): Promise<string> {
   return `请求失败（${response.status}）`
 }
 
-export async function request<T>(path: string, init?: RequestInit): Promise<T> {
+/** 带上 JWT 和 JSON 类型发请求；非 2xx 转成 ApiError（401 时退出登录）。返回原始 Response。 */
+async function send(path: string, init?: RequestInit): Promise<Response> {
   // 用 Headers 合并：调用方可以传对象、数组或 Headers 实例，都不会丢
   const headers = new Headers(init?.headers)
   // 只给字符串（JSON）请求体加类型；FormData 由浏览器自动带上 multipart 边界，不能手动设置
@@ -59,6 +64,11 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
     }
     throw new ApiError(response.status, await errorMessage(response))
   }
+  return response
+}
+
+export async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await send(path, init)
   // 204 / 空响应体没有 JSON 可解析
   if (response.status === 204 || response.headers.get('Content-Length') === '0') {
     return undefined as T
@@ -125,4 +135,25 @@ export const adminApi = {
     }),
   evalRuns: (suite?: string) =>
     request<EvalRun[]>(`/api/v1/admin/eval-runs${suite ? `?suite=${encodeURIComponent(suite)}` : ''}`),
+}
+
+// ---- 对话 ----
+export const chatApi = {
+  threads: () => request<ChatThread[]>('/api/v1/threads'),
+  rename: (id: string, title: string) =>
+    request<ChatThread>(`/api/v1/threads/${id}`, { method: 'PATCH', body: json({ title }) }),
+  remove: (id: string) => request<void>(`/api/v1/threads/${id}`, { method: 'DELETE' }),
+  messages: (id: string) => request<ChatMessage[]>(`/api/v1/threads/${id}/messages`),
+
+  /** 发送消息并逐个产出 SSE 事件。不传 threadId 时后端新建会话，第一个事件是 thread。 */
+  async *stream(
+    body: { thread_id?: string; message: string },
+    signal?: AbortSignal,
+  ): AsyncGenerator<ChatEvent> {
+    const response = await send('/api/v1/chat', { method: 'POST', body: json(body), signal })
+    if (!response.body) throw new ApiError(response.status, '服务器没有返回内容')
+    for await (const { event, data } of readSse(response.body)) {
+      yield { type: event, ...(JSON.parse(data) as object) } as ChatEvent
+    }
+  },
 }

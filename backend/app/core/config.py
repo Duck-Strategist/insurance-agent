@@ -91,6 +91,30 @@ class RagSettings(BaseModel):
         return self.data_dir / "parsed"
 
 
+class LlmSettings(BaseModel):
+    """对话模型：任何 OpenAI 兼容接口（spec D36）。
+
+    默认用 DashScope 的 qwen-plus，Key 不填时复用 RAG__DASHSCOPE_API_KEY；
+    换 DeepSeek 只需设置 LLM__BASE_URL=https://api.deepseek.com、LLM__MODEL=deepseek-chat、LLM__API_KEY。
+    """
+
+    base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    api_key: SecretStr | None = None
+    model: str = "qwen-plus"
+    temperature: float = 0.3
+    timeout_seconds: float = 60.0
+    max_retries: int = 2
+    # 回答时放进上下文的章节原文，每节最多这么多字（父块最长 2500 字，5 节约 1 万字）
+    context_chars_per_section: int = 1500
+    # 路由与改写时带上最近几轮对话
+    history_turns: int = 3
+
+    @field_validator("api_key", mode="before")
+    @classmethod
+    def _blank_as_none(cls, v: object) -> object:
+        return None if isinstance(v, str) and not v.strip() else v
+
+
 DEV_JWT_SECRET = "dev-insecure-jwt-secret-change-me-please"
 
 
@@ -113,6 +137,11 @@ class Settings(BaseSettings):
     log: LogSettings = LogSettings()
     auth: AuthSettings = AuthSettings()
     rag: RagSettings = RagSettings()
+    llm: LlmSettings = LlmSettings()
+
+    def llm_api_key(self) -> SecretStr | None:
+        """对话模型的 Key：没单独配置时复用 DashScope 的 Key（默认模型就在 DashScope 上）。"""
+        return self.llm.api_key or self.rag.dashscope_api_key
 
     @model_validator(mode="after")
     def _reject_dev_secret_in_prod(self) -> "Settings":

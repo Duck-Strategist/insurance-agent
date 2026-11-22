@@ -433,3 +433,38 @@ def test_default_reports_dir_falls_back_to_data_dir(tmp_path) -> None:  # type: 
     assert default_reports_dir(RagSettings(data_dir=data)) == data / "eval" / "reports"
     (tmp_path / "eval").mkdir()
     assert default_reports_dir(RagSettings(data_dir=data)) == tmp_path / "eval" / "reports"
+
+
+async def test_alt_query_recall_is_fused_and_rerank_uses_main_query(
+    session_factory: async_sessionmaker[AsyncSession], docs: dict[str, int]
+) -> None:
+    """补充查询（原问题）召回到的块也进入候选；重排只用主查询（改写后的查询）。"""
+    seen_queries: list[str] = []
+
+    class RecordingReranker(ReverseReranker):
+        async def rerank(self, query: str, documents: list[str]) -> list[RerankResult]:
+            seen_queries.append(query)
+            return await super().rerank(query, documents)
+
+    near = [0.0] * EMBEDDING_DIM
+    near[1] = 1.0
+    r = Retriever(
+        session_factory,
+        # 一次请求同时算主查询和补充查询：顺序必须与传入一致
+        FakeEmbedder({"等待期": near, "嘎嘣脆": onehot(900)}),
+        RecordingReranker(),
+        RetrievalSettings(recall_k=1),
+    )
+    main_only = await r.search("等待期", mode=SearchMode.HYBRID, document_ids=[docs["a"]])
+    assert ["第三条 宽限期"] not in [h.section_path for h in main_only.hits]
+
+    both = await r.search(
+        "等待期", mode=SearchMode.HYBRID_RERANK, document_ids=[docs["a"]], alt_queries=["嘎嘣脆"]
+    )
+    assert ["第三条 宽限期"] in [h.section_path for h in both.hits]
+    assert seen_queries == ["等待期"]
+    # 与主查询相同的补充查询被忽略，不重复召回
+    same = await r.search(
+        "等待期", mode=SearchMode.VECTOR, document_ids=[docs["a"]], alt_queries=["等待期"]
+    )
+    assert [h.section_path for h in same.hits] == [h.section_path for h in main_only.hits][:1]

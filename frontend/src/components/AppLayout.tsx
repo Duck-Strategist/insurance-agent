@@ -8,7 +8,8 @@ import { UserMenu } from './UserMenu'
 const NAV_ITEMS = [
   { key: '/', label: <Link to="/">首页</Link> },
   { key: '/products', label: <Link to="/products">保险产品</Link> },
-  // 后续里程碑加入：顾问对话、我的画像
+  { key: '/chat', label: <Link to="/chat">智能顾问</Link> },
+  // 后续里程碑加入：我的画像
 ]
 const ADMIN_ITEMS = [
   { key: '/admin/documents', label: <Link to="/admin/documents">条款管理</Link> },
@@ -18,6 +19,7 @@ const ADMIN_ITEMS = [
 
 function selectedNav(pathname: string): string {
   if (pathname.startsWith('/products')) return '/products'
+  if (pathname.startsWith('/chat')) return '/chat'
   return pathname
 }
 

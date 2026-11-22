@@ -5,6 +5,7 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.runtime import AgentRuntime
 from app.core.config import Settings, get_settings
 from app.core.security import InvalidTokenError, decode_access_token
 from app.models import User, UserRole
@@ -79,3 +80,17 @@ def get_retriever(request: Request) -> Retriever:
 
 
 RetrieverDep = Annotated[Retriever, Depends(get_retriever)]
+
+
+def get_agent(request: Request) -> AgentRuntime:
+    # 应用启动时创建（见 app.main）；对话模型或检索未配置时为 None
+    runtime: AgentRuntime | None = getattr(request.app.state, "agent", None)
+    if runtime is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="对话服务未配置：缺少对话模型或检索的 Key",
+        )
+    return runtime
+
+
+AgentDep = Annotated[AgentRuntime, Depends(get_agent)]

@@ -19,6 +19,8 @@ from pathlib import Path, PurePath
 
 import anyio
 
+from app.agent.graph import rewrite_query
+from app.agent.llm import make_llms
 from app.core.config import RagSettings, get_settings
 from app.core.logging import configure_logging
 from app.eval import dataset as ds
@@ -35,6 +37,7 @@ from app.eval.retrieval import (
     Scope,
     document_ids_by_name,
     evaluate,
+    product_names_by_file,
     save_runs,
 )
 from app.infra.db import Database
@@ -81,8 +84,31 @@ async def cmd_generate(per_doc: int, out: Path) -> int:
     return 0
 
 
+async def rewrite_all(
+    items: list[ds.RetrievalItem], names: dict[str, list[str]], concurrency: int = 5
+) -> tuple[dict[str, str], str]:
+    """用线上同一个改写函数和模型改写每道题，返回 (题目 id → 查询, 模型名)。"""
+    settings = get_settings()
+    json_llm, _ = make_llms(settings.llm, settings.llm_api_key())
+    sem = asyncio.Semaphore(concurrency)
+    queries: dict[str, str] = {}
+
+    async def one(item: ds.RetrievalItem) -> None:
+        async with sem:
+            products = names.get(item.file_name) or [PurePath(item.file_name).stem]
+            queries[item.id] = await rewrite_query(json_llm, item.question, products=products)
+
+    await asyncio.gather(*(one(i) for i in items))
+    return queries, settings.llm.model
+
+
 async def cmd_retrieval(
-    datasets: list[Path], modes: list[SearchMode], scope: Scope, reports_dir: Path | None
+    datasets: list[Path],
+    modes: list[SearchMode],
+    scope: Scope,
+    reports_dir: Path | None,
+    rewrite: bool = False,
+    keep_original: bool = False,
 ) -> int:
     settings = get_settings()
     rag = settings.rag
@@ -117,15 +143,35 @@ async def cmd_retrieval(
             print("以下标准章节在库里不存在：\n  " + "\n  ".join(unknown), file=sys.stderr)
             return 2
         async with retriever(rag, db.session_factory) as r:
+            names = await product_names_by_file(db.session_factory) if rewrite else {}
             for path, items, digest in loaded:
+                queries: dict[str, str] = {i.id: i.question for i in items}
+                extra: dict[str, object] = {}
+                if rewrite:
+                    print(f"{path.name}：改写查询……")
+                    queries, llm_model = await rewrite_all(items, names)
+                    extra = {"rewrite": True, "rewrite_model": llm_model}
+                    if keep_original:
+                        extra["keep_original"] = True
                 vectors: dict[str, list[float]] = {}
+                alt_vectors: dict[str, list[float]] | None = (
+                    {} if rewrite and keep_original else None
+                )
                 embed_ms: dict[str, float] = {}
                 for item in items:
                     t0 = time.perf_counter()
-                    vectors[item.id] = await r.embed_query(item.question)
+                    texts = [queries[item.id]]
+                    if alt_vectors is not None:
+                        texts.append(item.question)  # 与线上一样，一次请求算两条
+                    got = await r.embed_queries(texts)
+                    vectors[item.id] = got[0]
+                    if alt_vectors is not None:
+                        alt_vectors[item.id] = got[1]
                     embed_ms[item.id] = round((time.perf_counter() - t0) * 1000, 1)
                 print(f"\n{path.name}：{len(items)} 题，范围 {scope}")
-                results = await evaluate(r, items, modes, scope, doc_ids, vectors, embed_ms)
+                results = await evaluate(
+                    r, items, modes, scope, doc_ids, vectors, embed_ms, queries, alt_vectors
+                )
                 saved = await save_runs(
                     db.session_factory,
                     dataset=path.name,
@@ -135,6 +181,7 @@ async def cmd_retrieval(
                     extra_config={
                         "embedding_model": rag.embedding_model,
                         "rerank_model": rag.rerank_model,
+                        **extra,
                     },
                     results=results,
                 )
@@ -234,6 +281,12 @@ def main() -> None:
         "datasets", nargs="*", type=Path, help="默认 RAG__DATA_DIR/eval 下的生成集与难题集"
     )
     p_ret.add_argument("--reports-dir", type=Path, help="报告目录，默认见模块说明")
+    p_ret.add_argument(
+        "--rewrite", action="store_true", help="先用对话模型把问题改写成条款用语再检索（spec Q14）"
+    )
+    p_ret.add_argument(
+        "--keep-original", action="store_true", help="配合 --rewrite：原问题也一起召回（spec D39）"
+    )
     p_ret.add_argument("--scope", choices=["document", "global"], default="document")
     p_ret.add_argument(
         "--modes", default=",".join(m.value for m in SearchMode), help="逗号分隔的检索配置"
@@ -248,7 +301,16 @@ def main() -> None:
             code = asyncio.run(cmd_generate(args.per_doc, out))
         else:
             modes = [SearchMode(m) for m in args.modes.split(",")]
-            code = asyncio.run(cmd_retrieval(args.datasets, modes, args.scope, args.reports_dir))
+            code = asyncio.run(
+                cmd_retrieval(
+                    args.datasets,
+                    modes,
+                    args.scope,
+                    args.reports_dir,
+                    args.rewrite,
+                    args.keep_original,
+                )
+            )
     except RagNotConfiguredError as exc:
         print(f"{exc}（写在 backend/.env）", file=sys.stderr)
         code = 2

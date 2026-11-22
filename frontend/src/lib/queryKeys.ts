@@ -14,4 +14,6 @@ export const queryKeys = {
   adminSearch: (query: string, mode: string, docId: number | undefined) =>
     [USER_SCOPE, 'admin', 'search', query, mode, docId ?? 'all'] as const,
   adminEvalRuns: (suite: string) => [USER_SCOPE, 'admin', 'eval-runs', suite] as const,
+  threads: [USER_SCOPE, 'threads'] as const,
+  threadMessages: (id: string) => [USER_SCOPE, 'threads', id, 'messages'] as const,
 }
