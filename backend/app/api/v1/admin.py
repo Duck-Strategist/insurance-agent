@@ -26,6 +26,7 @@ from app.core.logging import get_logger
 from app.rag.embedder import EmbeddingError
 from app.rag.factory import RagNotConfiguredError, check_configured, ingestion_pipeline
 from app.rag.reranker import RerankError
+from app.rag.retriever import Retriever
 from app.schemas.document import DocumentOut, ParentPage
 from app.schemas.retrieval import EvalRunOut, SearchHitOut, SearchRequest, SearchResponse
 from app.services.document_service import DocumentService
@@ -61,11 +62,15 @@ def _schedule_ingest(
         raise HTTPException(status.HTTP_409_CONFLICT, detail="该文档正在入库，请稍后")
     processing.add(file_name)
     session_factory = request.app.state.db.session_factory
+    retriever: Retriever | None = getattr(request.app.state, "retriever", None)
 
     async def run() -> None:
         try:
             async with ingestion_pipeline(rag, session_factory) as pipeline:
-                await pipeline.ingest(rag.clauses_dir / file_name, force=True)
+                result = await pipeline.ingest(rag.clauses_dir / file_name, force=True)
+            if result.outcome == "indexed" and retriever is not None:
+                # 新条款的词要参与全文检索的 IDF 统计，不等缓存过期
+                retriever.invalidate_term_stats()
         except Exception:
             # pipeline 内部已把文档标为 failed；这里兜底记录组装阶段的异常
             logger.exception("admin.ingest_crashed", file=file_name)

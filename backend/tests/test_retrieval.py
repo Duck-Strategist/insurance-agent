@@ -332,3 +332,104 @@ async def test_document_reindexed_during_rerank_does_not_crash(
     r = make_retriever(session_factory, DeletingReranker())
     res = await r.search("等待期 嘎嘣脆", mode=SearchMode.HYBRID_RERANK, document_ids=[docs["a"]])
     assert res.hits == []
+
+
+async def test_terms_missing_from_cached_stats_still_recall(
+    session_factory: async_sessionmaker[AsyncSession], docs: dict[str, int]
+) -> None:
+    """词频缓存之后才入库的条款：它独有的词不在缓存里，也必须能被全文召回（不等缓存过期）。"""
+    r = make_retriever(session_factory)
+    await r.search("等待期 嘎嘣脆", mode=SearchMode.HYBRID, document_ids=[docs["a"]])  # 加载缓存
+    async with session_factory() as s, s.begin():
+        new = await add_doc(
+            s, "检索测试丁.pdf", [("第一条 新词", [("丁丁独有词咕噜噜。", 700)])], indexed=True
+        )
+    r._embedder = FakeEmbedder({"咕噜噜": onehot(5)})  # type: ignore[assignment]
+    res = await r.search("咕噜噜", mode=SearchMode.HYBRID, document_ids=[new.id])
+    assert res.fulltext_ids, "缓存里没有的词被丢掉了"
+
+
+async def test_invalidate_term_stats_forces_reload(
+    session_factory: async_sessionmaker[AsyncSession], docs: dict[str, int]
+) -> None:
+    r = make_retriever(session_factory)
+    await r.search("等待期 嘎嘣脆", mode=SearchMode.HYBRID, document_ids=[docs["a"]])
+    assert r._df_loaded_at is not None
+    r.invalidate_term_stats()
+    assert r._df_loaded_at is None
+    await r.search("等待期 嘎嘣脆", mode=SearchMode.HYBRID, document_ids=[docs["a"]])
+    assert r._df_loaded_at is not None
+
+
+async def test_total_is_wall_clock_including_parent_load(
+    session_factory: async_sessionmaker[AsyncSession], docs: dict[str, int]
+) -> None:
+    res = await make_retriever(session_factory, ReverseReranker()).search(
+        "等待期 嘎嘣脆", mode=SearchMode.HYBRID_RERANK, document_ids=[docs["a"]]
+    )
+    t = res.timings
+    assert "load_ms" in t
+    stages = t["embed_ms"] + t["recall_ms"] + t["rerank_ms"] + t["load_ms"]
+    assert t["total_ms"] >= stages - 0.5  # 各阶段四舍五入到 0.1 ms
+
+
+# ---- 评测命令行 ----
+
+
+async def test_generation_auth_error_stops_batch_and_cancels_siblings() -> None:
+    """第一题 401 时立即停止：其余仍在等待响应的请求被取消，而不是继续跑到客户端被关闭。"""
+    import asyncio
+
+    import httpx as _httpx
+
+    from app.eval.generate import GenerationAuthError, QuestionGenerator, generate_items
+
+    calls = 0
+    cancelled = 0
+    never = asyncio.Event()
+
+    async def handler(request: _httpx.Request) -> _httpx.Response:
+        nonlocal calls, cancelled
+        calls += 1
+        if calls == 1:
+            return _httpx.Response(401, text="invalid key")
+        try:
+            # 模拟慢请求，只有被取消才会结束（no_sleep 夹具让 asyncio.sleep 立即返回，不能用它）
+            await never.wait()
+        except asyncio.CancelledError:
+            cancelled += 1
+            raise
+        return _httpx.Response(200)
+
+    gen = QuestionGenerator(
+        "k", base_url="https://example.test/v1", model="m", transport=_httpx.MockTransport(handler)
+    )
+    sections = [Section("a.pdf", [f"第{i}条"], "正" * 100, i) for i in range(20)]
+    with pytest.raises(GenerationAuthError):
+        async with asyncio.timeout(5):
+            await generate_items(sections, gen)
+    await gen.aclose()
+    # 并发上限 5：第一题释放名额时可能还有 1 个排队任务抢先发出请求；
+    # 关键是除第一题外的所有请求都被取消，其余排队任务从未发出
+    assert calls <= 6
+    assert cancelled == calls - 1
+
+
+async def test_empty_dataset_rejected_before_running(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from app.eval.__main__ import cmd_retrieval
+
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("\n", encoding="utf-8")
+    assert await cmd_retrieval([empty], [SearchMode.VECTOR], "document", None) == 2
+
+
+def test_default_reports_dir_falls_back_to_data_dir(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from app.core.config import RagSettings
+    from app.eval.__main__ import default_reports_dir
+
+    data = tmp_path / "data"
+    data.mkdir()
+    # 没有仓库的 eval/ 目录（容器里）：写到数据目录下
+    assert default_reports_dir(RagSettings(data_dir=data)) == data / "eval" / "reports"
+    (tmp_path / "eval").mkdir()
+    assert default_reports_dir(RagSettings(data_dir=data)) == tmp_path / "eval" / "reports"

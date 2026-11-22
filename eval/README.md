@@ -12,7 +12,8 @@ $env:RAG__RETRIEVAL__FULLTEXT_WEIGHT = "0.5"; uv run python -m app.eval retrieva
 ## 检索 v1（M3，2026-11-21）
 
 - 范围：只在题目对应的条款内检索（对话里由代码先定位产品）。
-- 命中：返回的前 k 个章节（父块）里有任一标准章节。延迟 = 向量化 + 召回 + 重排，单位毫秒。
+- 命中：返回的前 k 个章节（父块）里有任一标准章节。延迟单位毫秒，本节数字 = 向量化 + 召回 + 重排；
+  之后的运行改为向量化 + 检索墙钟时间，多算了取章节原文的一次查询（实测约 10 ms，记为 `load_ms`）。
 - 向量 text-embedding-v4（1024 维）；基线重排 gte-rerank-v2（之后对比了 qwen3-rerank，见下）；每路召回 30 个子块，RRF k=60，重排 30 个候选，返回 5 个章节。
 - 完整报告（含未命中题目列表）：[reports/retrieval-document-20261121-185832.md](reports/retrieval-document-20261121-185832.md)
 

@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import PurePath
 
+import anyio.to_thread
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -106,7 +107,7 @@ class Retriever:
         # 词的文档频率（含有该词的子块数），算 IDF 用；入库后会变，定时刷新
         self._df: dict[str, int] = {}
         self._df_total = 0
-        self._df_loaded_at = 0.0
+        self._df_loaded_at: float | None = None  # None = 未加载或已失效
 
     async def search(
         self,
@@ -126,7 +127,7 @@ class Retriever:
         if mode is SearchMode.HYBRID_RERANK and self._reranker is None:
             raise ValueError("未配置重排模型，不能使用 hybrid_rerank")
 
-        t0 = time.perf_counter()
+        start = t0 = time.perf_counter()
         if query_vector is None:
             query_vector = (await self._embedder.embed([query]))[0]
         timings["embed_ms"] = _ms(t0)
@@ -167,8 +168,10 @@ class Retriever:
                 best[pid] = (cid, score)
             if len(best) == top_k:
                 break
+        t0 = time.perf_counter()
         async with self._sessions() as session:
             parents = await self._load_parents(session, list(best))
+        timings["load_ms"] = _ms(t0)
 
         hits = [
             Hit(
@@ -184,7 +187,8 @@ class Retriever:
             for pid, (cid, score) in best.items()
             if pid in parents  # 同上：重排期间文档被重新入库
         ]
-        timings["total_ms"] = sum(v for k, v in timings.items() if k != "total_ms")
+        # 墙钟时间：包括取父块、去重等各阶段之外的开销，不是各阶段相加
+        timings["total_ms"] = _ms(start)
         return SearchResult(hits, timings, vector_ids, fulltext_ids)
 
     async def embed_query(self, query: str) -> list[float]:
@@ -230,18 +234,20 @@ class Retriever:
         给每个命中的词加权（不含词频与长度归一化，子块长度本来就接近）。
         """
         cfg = self._settings
-        terms = query_terms(query)
+        # jieba 分词是 CPU 计算，首次调用还要加载词典（约 1 秒），放线程池，不阻塞事件循环
+        terms = await anyio.to_thread.run_sync(query_terms, query)
         if not terms:
             return []
         df, total = await self._term_df(session)
         if total == 0:
             return []
+        # 缓存里没有的词（df=0）按最稀有处理而不是丢掉：可能是缓存之后新入库条款里的词；
+        # 真的不存在的词匹配不到任何块，不影响结果
         weighted = [
             (t, bm25_idf(df.get(t, 0), total))
             for t in terms
             if df.get(t, 0) / total <= cfg.fulltext_max_df_ratio
         ]
-        weighted = [(t, w) for t, w in weighted if df.get(t, 0) > 0]
         if not weighted:
             return []
 
@@ -271,8 +277,13 @@ class Retriever:
         )
         return [cid for cid, _ in rows.all()]
 
+    def invalidate_term_stats(self) -> None:
+        """入库成功后调用：下次全文检索重新统计词频。"""
+        self._df_loaded_at = None
+
     async def _term_df(self, session: AsyncSession) -> tuple[dict[str, int], int]:
-        if time.monotonic() - self._df_loaded_at > self._settings.df_cache_seconds:
+        loaded = self._df_loaded_at
+        if loaded is None or time.monotonic() - loaded > self._settings.df_cache_seconds:
             rows = await session.execute(
                 text(
                     "SELECT word, ndoc FROM ts_stat("

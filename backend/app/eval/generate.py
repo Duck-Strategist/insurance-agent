@@ -42,6 +42,10 @@ PROMPT = """你在为保险条款检索系统构建评测集。下面是某款�
 只输出 JSON：{{"answerable": true, "question": "...", "evidence": "..."}}"""
 
 
+class GenerationAuthError(Exception):
+    """DashScope Key 无效：每一题都会失败，应立即停止整批生成。"""
+
+
 @dataclass
 class Section:
     file_name: str
@@ -154,7 +158,9 @@ class QuestionGenerator:
                     resp = None
                 else:
                     if resp.status_code in (401, 403):
-                        resp.raise_for_status()  # 凭证错误直接中止整个生成
+                        raise GenerationAuthError(
+                            f"DashScope API Key 无效（HTTP {resp.status_code}）"
+                        )
                     if resp.status_code == 200:
                         break
                 await asyncio.sleep(2**attempt)
@@ -175,7 +181,16 @@ async def generate_items(
     sections: list[Section], generator: QuestionGenerator
 ) -> tuple[list[RetrievalItem], dict[str, int]]:
     """返回 (通过校验的题目, 丢弃原因统计)。"""
-    results = await asyncio.gather(*(generator.generate(s) for s in sections))
+    tasks = [asyncio.create_task(generator.generate(s)) for s in sections]
+    try:
+        results = await asyncio.gather(*tasks)
+    except BaseException:
+        # 一题抛出（如 Key 无效）时 gather 立即返回，其余任务仍在跑；先取消并等它们结束，
+        # 否则调用方随后关闭 HTTP 客户端，这些任务会再报一堆"客户端已关闭"的错误，掩盖真正原因
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
     items: list[RetrievalItem] = []
     dropped = {"llm_error": 0, "not_answerable": 0, "evidence_not_found": 0}
     for section, data in zip(sections, results, strict=True):

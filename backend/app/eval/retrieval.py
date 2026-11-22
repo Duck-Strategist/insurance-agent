@@ -3,7 +3,7 @@
 - 范围（scope）：document = 只在题目对应的条款里检索（对话中由代码先定位产品，这是线上的真实情况）；
   global = 不限条款（衡量跨产品时会不会串）。
 - 每题的查询向量只算一次，三种配置共用：配置之间的差别只来自召回与重排，不受向量化接口抖动影响。
-  向量化耗时单独记录，总延迟 = 向量化 + 召回 + 重排。
+  向量化耗时单独记录，总延迟 = 向量化 + 检索器内部的墙钟时间（召回、重排、取父块）。
 """
 
 from collections import defaultdict
@@ -75,9 +75,11 @@ async def evaluate(
                 top_k=EVAL_TOP_K,
                 query_vector=vectors[item.id],
             )
+            # 查询向量是预先算好传进去的：检索器内部的 embed_ms 约为 0，
+            # 换成预先测得的向量化耗时，总耗时 = 向量化 + 检索器内部的墙钟时间（不含向量化）
             timings = {**res.timings, "embed_ms": embed_ms[item.id]}
             timings["total_ms"] = round(
-                timings["embed_ms"] + timings.get("recall_ms", 0) + timings.get("rerank_ms", 0), 1
+                embed_ms[item.id] + res.timings["total_ms"] - res.timings["embed_ms"], 1
             )
             retrieved = [(h.file_name, h.section_path) for h in res.hits]
             rank = M.first_hit_rank([(f, tuple(p)) for f, p in retrieved], item.gold_keys())  # type: ignore[arg-type]
@@ -112,6 +114,7 @@ def summarize(results: list[ItemResult]) -> dict[str, Any]:
             "embed": lat("embed_ms"),
             "recall": lat("recall_ms"),
             "rerank": lat("rerank_ms"),
+            "load": lat("load_ms"),
         },
         "recall@5_by_doc": {
             doc: {"n": len(rs), "recall@5": round(M.recall_at(rs, 5), 4)}

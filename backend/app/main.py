@@ -4,6 +4,7 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 
+import anyio.to_thread
 import structlog
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +16,7 @@ from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging, get_logger
 from app.infra.db import Database
 from app.rag.factory import RagNotConfiguredError, check_configured, retriever
+from app.rag.tokenizer import tokenize
 
 logger = get_logger(__name__)
 
@@ -46,6 +48,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 app.state.retriever = await stack.enter_async_context(
                     retriever(settings.rag, app.state.db.session_factory)
                 )
+                # jieba 首次分词要加载词典（约 1 秒）：启动时在线程里预热，不让第一个检索请求卡住
+                await anyio.to_thread.run_sync(tokenize, "预热分词词典")
             logger.info("app.startup", env=settings.app.env)
             try:
                 yield

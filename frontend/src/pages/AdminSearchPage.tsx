@@ -28,6 +28,7 @@ const TIMING_LABELS: Record<string, string> = {
   embed_ms: '向量化',
   recall_ms: '召回',
   rerank_ms: '重排',
+  load_ms: '取章节',
   total_ms: '合计',
 }
 

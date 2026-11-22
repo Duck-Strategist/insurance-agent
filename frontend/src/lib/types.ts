@@ -128,7 +128,13 @@ export interface RetrievalMetrics {
   'recall@5': number
   'recall@10': number
   'mrr@10': number
-  latency_ms: { total: LatencyStat; embed: LatencyStat; recall: LatencyStat; rerank: LatencyStat }
+  latency_ms: {
+    total: LatencyStat
+    embed: LatencyStat
+    recall: LatencyStat
+    rerank: LatencyStat
+    load?: LatencyStat
+  }
 }
 
 export interface EvalRun {
