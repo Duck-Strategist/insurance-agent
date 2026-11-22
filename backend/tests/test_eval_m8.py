@@ -112,17 +112,78 @@ async def test_routing_run_and_summary() -> None:
 # ---------- 端到端：裁判解析与汇总 ----------
 
 
-def test_parse_judgement_is_strict() -> None:
-    ok = e2e.parse_judgement(
-        {"refused": False, "correctness": "partial", "reason": "漏了条件",
-         "citations": [{"index": 1, "supported": True}, {"index": 2, "supported": "yes"}]},
+PASSAGES = {
+    1: (["第三条 等待期"], "本合同的等待期为 90 天，自合同生效日起计算。"),
+    2: (
+        ["第九条 责任免除"],
+        "因下列情形之一导致被保险人身故的，我们不承担给付保险金的责任：（一）酒后驾驶。",
+    ),
+}
+
+
+def test_parse_judgement_verifies_quotes() -> None:
+    """引用有没有依据不听裁判一句话：摘录必须真的出现在第 n 段里。"""
+    j = e2e.parse_judgement(
+        {
+            "refused": False,
+            "correctness": "partial",
+            "errors": ["说等待期 30 天"],
+            "reason": "数字错",
+            "citations": [
+                {"index": 1, "claim": "等待期 90 天", "quote": "本合同的等待期为 90 天"},
+                # 裁判声称有依据，但摘录在第 2 段里找不到（改写过）
+                {"index": 2, "claim": "酒驾不赔", "quote": "酒驾的情况保险公司不赔"},
+            ],
+        },
         cited=[1, 2],
+        passages=PASSAGES,
+    )
+    assert j.correctness == "partial" and j.parsed and j.errors == ["说等待期 30 天"]
+    assert j.citations == {1: True, 2: False}
+    assert j.quotes[1] == "本合同的等待期为 90 天"
+    # 摘录空白、换行、表格标签不影响核对；摘录太短（不足 6 字）不算
+    spaced = e2e.parse_judgement(
+        {"refused": False, "correctness": "correct",
+         "citations": [{"index": 1, "quote": "等待期为 90\n天，自合同"},
+                       {"index": 2, "quote": "酒后"}]},
+        cited=[1, 2],
+        passages=PASSAGES,
     )  # fmt: skip
-    assert ok.correctness == "partial" and ok.parsed
-    assert ok.citations == {1: True, 2: False}  # 只认 true
-    # 裁判漏判了 [3]：按不支持记，并标记不完整；正确性非法按 incorrect
-    bad = e2e.parse_judgement({"correctness": "great", "citations": []}, cited=[3])
-    assert (bad.correctness, bad.citations, bad.parsed) == ("incorrect", {3: False}, False)
+    assert spaced.citations == {1: True, 2: False}
+    # 编号不在回答模型看到的段落里、裁判漏判、正确性非法：都按最不利记
+    bad = e2e.parse_judgement(
+        {"correctness": "great", "citations": [{"index": 7, "quote": "等待期为 90 天"}]},
+        cited=[3, 7],
+        passages=PASSAGES,
+    )
+    assert (bad.correctness, bad.parsed) == ("incorrect", False)
+    assert bad.citations == {3: False, 7: False}
+
+
+def test_quote_matching_tolerates_format_but_not_paraphrase() -> None:
+    """来自开发集（v1 抽检的 17 题）里 v2 核对失败的真实情况。"""
+    passage = (
+        "本合同首个保单年度健康管理系数等于 100%。被保险人参加本公司指定的合作医疗机构"
+        "<sup>11</sup>或服务供应商提供的健康管理服务。每种轻度疾病限给付一次。"
+        "本合同轻度疾病保险金累计给付次数以 4 次为限。"
+    )
+    q = e2e.quote_in_passage
+    assert q("被保险人参加本公司指定的合作医疗机构或服务供应商", passage)  # 上标被省略
+    assert q("首个保单年度健康管理系数等于 100%。\\n本合同轻度疾病保险金累计给付次数", passage)
+    # 两句拼接
+    assert q("每种轻度疾病限给付一次。本合同轻度疾病保险金累计给付次数以4次为限", passage)
+    assert q("健康管理系数等于100%;每种轻度疾病限给付一次", passage)  # 半角标点
+    assert not q("被保险人参加了任意机构的服务", passage)  # 改写过的
+    assert not q("每种轻度疾病限给付一次。累计不限次数的说法", passage)  # 一句对一句不对
+    assert not q("等于", passage)  # 太短
+
+
+def test_judge_prompt_shows_all_passages_with_answer_numbering() -> None:
+    block = e2e.passages_block(PASSAGES)
+    assert block.index("[1] 第三条 等待期") < block.index("[2] 第九条 责任免除")
+    assert e2e.passages_block({}) == "（没有检索到条款原文）"
+    prompt = e2e.JUDGE_USER.format(question="q", reference_block="r", passages=block, answer="a")
+    assert "回答模型看到的全部条款原文" in prompt and "quote" in prompt
 
 
 def result(
@@ -153,12 +214,23 @@ def test_e2e_summary() -> None:
     assert m["unanswerable"] == {"n": 2, "refusal_rate": 0.5, "hallucination_rate": 0.5}
 
 
+def test_blind_csv_hides_judge(tmp_path: Path) -> None:
+    rs = [result("a01", True, "partial", False, {1: True})]
+    path = tmp_path / "blind.csv"
+    e2e.write_human_csv(path, 9, rs, {}, blind=True)
+    row = next(csv.DictReader(path.open(encoding="utf-8-sig")))
+    assert (row["judge_correctness"], row["judge_refused"], row["judge_citations"]) == ("", "", "")
+
+
 def test_human_sample_csv_and_agreement(tmp_path: Path) -> None:
     rs = [result(f"a{i:02d}", True, "correct", False, {1: True}) for i in range(20)]
     rs += [result(f"n{i}", False, "correct", True, {}) for i in range(5)]
     sample = e2e.sample_for_human(rs, seed=1)
     assert sum(r.item.answerable for r in sample) == 4 and len(sample) == 5
     assert e2e.sample_for_human(rs, seed=1) == sample  # 固定种子可复现
+    # 排除看过的题后再抽：不重复，每层题数仍按全部题目的比例
+    again = e2e.sample_for_human(rs, seed=1, exclude=frozenset(r.item.id for r in sample))
+    assert len(again) == 5 and not {r.item.id for r in again} & {r.item.id for r in sample}
 
     path = tmp_path / "h.csv"
     e2e.write_human_csv(path, 7, sample, {r.item.id: "标准原文" for r in sample})
@@ -177,6 +249,14 @@ def test_human_sample_csv_and_agreement(tmp_path: Path) -> None:
         w.writerows(rows)
     run_id, back = e2e.read_human_csv(path)
     got = e2e.agreement(back)
+    # 同一批人工标注和另一次运行的裁判比：裁判结论按题目 id 从那次运行的逐题结果里取
+    details = [r.as_detail() for r in rs]
+    for d in details:
+        d["judge"]["correctness"] = "partial"
+    other = e2e.agreement(e2e.with_judge(back, details))
+    assert other["correctness_agreement"] == 0.2  # 人工只有 1 题是 partial
+    with pytest.raises(ValueError, match="这次运行里没有这些题"):
+        e2e.with_judge(back, details[:1])
     assert run_id == 7 and got["n"] == 5
     assert got["correctness_agreement"] == 0.8
     assert got["refused_agreement"] == 1.0

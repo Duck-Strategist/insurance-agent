@@ -8,8 +8,11 @@ uv run python -m app.eval routing [routing_dev.jsonl]
     路由评测（默认测试集 routing_test.jsonl；调提示词时只看开发集，spec Q16）
 uv run python -m app.eval e2e [--judge-model qwen-max]
     端到端评测：条款问答 + LLM 裁判，写入 eval_runs，另导出 20% 抽样 CSV 供人工标注
-uv run python -m app.eval agreement eval/reports/e2e-<run>-human.csv
-    人工标注后计算裁判与人工的一致率，写回同一条 eval_runs 记录
+uv run python -m app.eval rejudge 147 --exclude ../eval/reports/e2e-147-human-labeled.csv
+    用当前版本的裁判重判某次运行里已有的回答（回答不重新生成），写一条新的 eval_runs；
+    --exclude 里的题（调裁判时看过的）不进新的人工抽检样本
+uv run python -m app.eval agreement eval/reports/e2e-<run>-human.csv [--run N] [--key human]
+    人工标注后计算裁判与人工的一致率；--run 指定和哪次运行的裁判比（默认文件里的 run_id）
 
 评测集读自 RAG__DATA_DIR/eval；报告默认写到仓库的 eval/reports/，
 在容器里（没有仓库目录）则写到 RAG__DATA_DIR/eval/reports/，也可用 --reports-dir 指定。
@@ -17,11 +20,13 @@ uv run python -m app.eval agreement eval/reports/e2e-<run>-human.csv
 
 import argparse
 import asyncio
+import functools
 import statistics
 import sys
 import time
 from datetime import datetime
 from pathlib import Path, PurePath
+from typing import Any
 
 import anyio
 from langchain_core.language_models import BaseChatModel
@@ -313,21 +318,110 @@ async def judge_one(
     judge_llm: BaseChatModel,
     item: e2e.E2EItem,
     answer: str,
-    citations: list[dict[str, object]],
+    cited: list[int],
+    passages: dict[int, tuple[list[str], str]],
     gold_text: str,
     config: RunnableConfig,
 ) -> e2e.Judgement:
+    """passages：回答模型看到的全部段落（编号 → (章节路径, 原文)），编号与回答里的 [n] 一致。"""
     prompt = e2e.JUDGE_USER.format(
         question=item.question,
         reference_block=e2e.reference_block(item, gold_text),
+        passages=e2e.passages_block(passages),
         answer=answer,
-        cited=e2e.cited_block(citations),
     )
     resp = await judge_llm.ainvoke(
         [SystemMessage(content=e2e.JUDGE_SYSTEM), HumanMessage(content=prompt)], config=config
     )
-    cited = [int(str(c["index"])) for c in citations]
-    return e2e.parse_judgement(parse_json_object(str(resp.content)), cited)
+    return e2e.parse_judgement(parse_json_object(str(resp.content)), cited, passages)
+
+
+Sections = dict[tuple[str, tuple[str, ...]], str]
+
+
+async def e2e_context(
+    db: Database, items: list[e2e.E2EItem]
+) -> tuple[dict[str, int], Sections, dict[str, str]] | None:
+    """条款 id、全部章节原文、每题的标准章节原文；评测集与库对不上时打印原因并返回 None。"""
+    doc_ids = await document_ids_by_name(db.session_factory)
+    sections = {
+        (s.file_name, tuple(s.path)): s.content for s in await load_sections(db.session_factory)
+    }
+    missing = [
+        f"{i.id}: {' > '.join(p)}"
+        for i in items
+        for p in i.gold
+        if (i.file_name, tuple(p)) not in sections
+    ] + [f"{i.id}: 条款未入库 {i.file_name}" for i in items if i.file_name not in doc_ids]
+    if missing:
+        print("评测集与库不一致：\n  " + "\n  ".join(missing), file=sys.stderr)
+        return None
+    references = {
+        i.id: "\n\n".join(sections[(i.file_name, tuple(p))] for p in i.gold) for i in items
+    }
+    return doc_ids, sections, references
+
+
+async def save_e2e(
+    db: Database,
+    *,
+    dataset: str,
+    digest: str,
+    config: dict[str, object],
+    results: list[e2e.E2EResult],
+) -> tuple[int, dict[str, Any]]:
+    metrics = e2e.summarize(results)
+    async with db.session_factory() as session, session.begin():
+        run = EvalRun(
+            suite="e2e",
+            dataset=dataset,
+            dataset_hash=digest,
+            config=config,
+            metrics=metrics,
+            details=[x.as_detail() for x in results],
+        )
+        session.add(run)
+        await session.flush()
+        return run.id, metrics
+
+
+async def report_e2e(
+    rag: RagSettings,
+    reports_dir: Path | None,
+    *,
+    dataset: str,
+    run_id: int,
+    metrics: dict[str, Any],
+    results: list[e2e.E2EResult],
+    references: dict[str, str],
+    exclude: frozenset[str] = frozenset(),
+    blind: bool = False,
+) -> None:
+    reports: Path = (
+        reports_dir
+        if reports_dir is not None
+        else await anyio.to_thread.run_sync(default_reports_dir, rag)
+    )
+    await anyio.Path(reports).mkdir(parents=True, exist_ok=True)
+    sample = e2e.sample_for_human(results, exclude=exclude)
+    human_csv = reports / f"e2e-{run_id}-human.csv"
+    await anyio.to_thread.run_sync(
+        functools.partial(e2e.write_human_csv, blind=blind),
+        human_csv,
+        run_id,
+        sample,
+        references,
+    )
+    report = await write_report(
+        rag, reports, "e2e", "\n".join(render_e2e(dataset, run_id, metrics, results)) + "\n"
+    )
+    a, u = metrics["answerable"], metrics["unanswerable"]
+    print(
+        f"\n正确性 {a['correctness']}（correct {a['correct_rate']}）  "
+        f"引用忠实度 {metrics['citation_precision']}  无答案题拒答率 {u['refusal_rate']}  "
+        f"有答案题误拒率 {a['false_refusal_rate']}  run #{run_id}"
+    )
+    print(f"报告：{report}\n人工抽检（{len(sample)} 题）：{human_csv}")
 
 
 async def cmd_e2e(
@@ -346,22 +440,10 @@ async def cmd_e2e(
     trace = eval_trace_config(settings, "e2e", path.name)
     db = Database(settings.db)
     try:
-        doc_ids = await document_ids_by_name(db.session_factory)
-        sections = {
-            (s.file_name, tuple(s.path)): s.content for s in await load_sections(db.session_factory)
-        }
-        missing = [
-            f"{i.id}: {' > '.join(p)}"
-            for i in items
-            for p in i.gold
-            if (i.file_name, tuple(p)) not in sections
-        ] + [f"{i.id}: 条款未入库 {i.file_name}" for i in items if i.file_name not in doc_ids]
-        if missing:
-            print("评测集与库不一致：\n  " + "\n  ".join(missing), file=sys.stderr)
+        ctx = await e2e_context(db, items)
+        if ctx is None:
             return 2
-        references = {
-            i.id: "\n\n".join(sections[(i.file_name, tuple(p))] for p in i.gold) for i in items
-        }
+        doc_ids, _, references = ctx
         sem = asyncio.Semaphore(concurrency)
         async with retriever(rag, db.session_factory) as r:
 
@@ -380,12 +462,30 @@ async def cmd_e2e(
                 latency = round((time.perf_counter() - t0) * 1000, 1)
                 answer = got.content if got else NOT_FOUND
                 citations = got.citations if got else []
+                passages = {
+                    i: (h.section_path, h.parent_content)
+                    for i, h in enumerate(got.hits if got else [], start=1)
+                }
                 judgement = await judge_one(
-                    judge_llm, item, answer, citations, references[item.id], trace
+                    judge_llm,
+                    item,
+                    answer,
+                    [int(str(c["index"])) for c in citations],
+                    passages,
+                    references[item.id],
+                    trace,
                 )
                 flag = "（拒答）" if judgement.refused else ""
                 print(f"  {item.id}: {judgement.correctness}{flag}")
-                return e2e.E2EResult(item, answer, citations, judgement, latency, got is None)
+                return e2e.E2EResult(
+                    item,
+                    answer,
+                    citations,
+                    judgement,
+                    latency,
+                    got is None,
+                    extra={"context": [{"index": i, "path": p} for i, (p, _) in passages.items()]},
+                )
 
             async def one(item: e2e.E2EItem) -> e2e.E2EResult:
                 async with sem:
@@ -393,48 +493,179 @@ async def cmd_e2e(
 
             print(f"{path.name}：{len(items)} 题，回答 {settings.llm.model}，裁判 {judge_model}")
             results = list(await asyncio.gather(*(one(i) for i in items)))
-        metrics = e2e.summarize(results)
-        async with db.session_factory() as session, session.begin():
-            run = EvalRun(
-                suite="e2e",
-                dataset=path.name,
-                dataset_hash=digest,
-                config={
-                    "answer_model": settings.llm.model,
-                    "judge_model": judge_model,
-                    "mode": "hybrid_rerank",
-                    "rerank_model": rag.rerank_model,
-                    "context_chars_per_section": settings.llm.context_chars_per_section,
-                },
-                metrics=metrics,
-                details=[x.as_detail() for x in results],
-            )
-            session.add(run)
-            await session.flush()
-            run_id = run.id
+        run_id, metrics = await save_e2e(
+            db,
+            dataset=path.name,
+            digest=digest,
+            config={
+                "answer_model": settings.llm.model,
+                "judge_model": judge_model,
+                "judge_version": e2e.JUDGE_VERSION,
+                "mode": "hybrid_rerank",
+                "rerank_model": rag.rerank_model,
+                "context_chars_per_section": settings.llm.context_chars_per_section,
+            },
+            results=results,
+        )
     finally:
         await db.dispose()
         flush_traces()
+    await report_e2e(
+        rag,
+        reports_dir,
+        dataset=path.name,
+        run_id=run_id,
+        metrics=metrics,
+        results=results,
+        references=references,
+    )
+    return 0
 
-    reports: Path = (
-        reports_dir
-        if reports_dir is not None
-        else await anyio.to_thread.run_sync(default_reports_dir, rag)
+
+async def cmd_rejudge(
+    source_id: int,
+    judge_model: str,
+    reports_dir: Path | None,
+    exclude_csv: Path | None,
+    concurrency: int,
+) -> int:
+    """用当前版本的裁判重判一次运行里的回答：回答不重新生成，只换裁判，前后两版的差别只来自裁判。
+
+    v1 的运行没有记下回答模型看到的全部段落，按原问题重新检索还原（检索是确定的，重排模型相同）；
+    被引用的编号以当时记下的章节为准，和重新检索的结果对不上的计数写进 config.context_mismatch。"""
+    settings = get_settings()
+    rag = settings.rag
+    exclude: frozenset[str] = frozenset()
+    if exclude_csv is not None:
+        _, rows = await anyio.to_thread.run_sync(e2e.read_human_csv, exclude_csv)
+        exclude = frozenset(r["id"] for r in rows)
+    judge_llm, _ = make_llms(
+        settings.llm.model_copy(update={"model": judge_model}), settings.llm_api_key()
     )
-    await anyio.Path(reports).mkdir(parents=True, exist_ok=True)
-    sample = e2e.sample_for_human(results)
-    human_csv = reports / f"e2e-{run_id}-human.csv"
-    await anyio.to_thread.run_sync(e2e.write_human_csv, human_csv, run_id, sample, references)
-    report = await write_report(
-        rag, reports, "e2e", "\n".join(render_e2e(path.name, run_id, metrics, results)) + "\n"
+    db = Database(settings.db)
+    try:
+        async with db.session_factory() as session:
+            source = await session.get(EvalRun, source_id)
+        if source is None or source.suite != "e2e":
+            print(f"eval_run #{source_id} 不存在或不是端到端评测", file=sys.stderr)
+            return 2
+        path = eval_data_dir(rag) / source.dataset
+        digest = await anyio.to_thread.run_sync(ds.file_hash, path)
+        if digest != source.dataset_hash:
+            print(f"{path.name} 在 #{source_id} 之后改过，不能按题目 id 对回答", file=sys.stderr)
+            return 2
+        items = {i.id: i for i in await anyio.to_thread.run_sync(e2e_load, path)}
+        ctx = await e2e_context(db, list(items.values()))
+        if ctx is None:
+            return 2
+        doc_ids, sections, references = ctx
+        trace = eval_trace_config(settings, "e2e-rejudge", path.name)
+        sem = asyncio.Semaphore(concurrency)
+        counts = {"rebuilt": 0, "mismatch": 0}
+        async with retriever(rag, db.session_factory) as r:
+
+            async def passages_of(
+                detail: dict[str, Any], item: e2e.E2EItem
+            ) -> dict[int, tuple[list[str], str]]:
+                if detail.get("context"):
+                    return {
+                        c["index"]: (
+                            c["path"],
+                            sections.get((item.file_name, tuple(c["path"])), ""),
+                        )
+                        for c in detail["context"]
+                    }
+                if detail.get("no_hits"):
+                    return {}
+                counts["rebuilt"] += 1
+                hits = (
+                    await r.search(
+                        item.question,
+                        mode=SearchMode.HYBRID_RERANK,
+                        document_ids=[doc_ids[item.file_name]],
+                    )
+                ).hits
+                passages = {
+                    i: (h.section_path, h.parent_content) for i, h in enumerate(hits, start=1)
+                }
+                for c in detail["cited_sections"]:
+                    if passages.get(c["index"], ([], ""))[0] != c["path"]:
+                        counts["mismatch"] += 1
+                        key = (item.file_name, tuple(c["path"]))
+                        passages[c["index"]] = (c["path"], sections.get(key, ""))
+                return passages
+
+            async def attempt(detail: dict[str, Any]) -> e2e.E2EResult:
+                item = items[detail["id"]]
+                passages = await passages_of(detail, item)
+                cited = [int(c["index"]) for c in detail["cited_sections"]]
+                citations = [
+                    {
+                        "index": i,
+                        "section_path": passages.get(i, ([], ""))[0],
+                        "parent_content": passages.get(i, ([], ""))[1],
+                    }
+                    for i in cited
+                ]
+                judgement = await judge_one(
+                    judge_llm,
+                    item,
+                    detail["answer"],
+                    cited,
+                    passages,
+                    references[item.id],
+                    trace,
+                )
+                print(f"  {item.id}: {detail['judge']['correctness']} → {judgement.correctness}")
+                return e2e.E2EResult(
+                    item,
+                    detail["answer"],
+                    citations,
+                    judgement,
+                    float(detail["latency_ms"]),
+                    bool(detail.get("no_hits")),
+                    extra={"context": [{"index": i, "path": p} for i, (p, _) in passages.items()]},
+                )
+
+            async def one(detail: dict[str, Any]) -> e2e.E2EResult:
+                async with sem:
+                    return await with_retries(lambda: attempt(detail), label=detail["id"])
+
+            print(
+                f"重判 #{source_id}：{len(source.details)} 题，"
+                f"裁判 {judge_model}（{e2e.JUDGE_VERSION}）"
+            )
+            results = list(await asyncio.gather(*(one(d) for d in source.details)))
+        run_id, metrics = await save_e2e(
+            db,
+            dataset=source.dataset,
+            digest=digest,
+            config={
+                **source.config,
+                "judge_model": judge_model,
+                "judge_version": e2e.JUDGE_VERSION,
+                "source_run": source_id,
+                "context_rebuilt": counts["rebuilt"],
+                "context_mismatch": counts["mismatch"],
+            },
+            results=results,
+        )
+    finally:
+        await db.dispose()
+        flush_traces()
+    print(f"还原上下文 {counts['rebuilt']} 题，被引用段落与重新检索对不上 {counts['mismatch']} 处")
+    # 新的抽检样本：排除调裁判时看过的题，并且不带裁判结论（盲标）
+    await report_e2e(
+        rag,
+        reports_dir,
+        dataset=source.dataset,
+        run_id=run_id,
+        metrics=metrics,
+        results=results,
+        references=references,
+        exclude=exclude,
+        blind=True,
     )
-    a, u = metrics["answerable"], metrics["unanswerable"]
-    print(
-        f"\n正确性 {a['correctness']}（correct {a['correct_rate']}）  "
-        f"引用忠实度 {metrics['citation_precision']}  无答案题拒答率 {u['refusal_rate']}  "
-        f"有答案题误拒率 {a['false_refusal_rate']}  run #{run_id}"
-    )
-    print(f"报告：{report}\n人工抽检（{len(sample)} 题）：{human_csv}")
     return 0
 
 
@@ -486,14 +717,16 @@ def render_e2e(
     return lines
 
 
-async def cmd_agreement(path: Path) -> int:
+async def cmd_agreement(path: Path, run_override: int | None, key: str) -> int:
+    """人工标注 vs 某次运行的裁判结论（按题目 id 对上），一致率写进那次运行的 metrics[key]。
+    同一批人工标注可以分别和 v1、v2 裁判比；用作调裁判开发集的那批，key 写 human_dev。"""
     settings = get_settings()
     try:
-        run_id, rows = await anyio.to_thread.run_sync(e2e.read_human_csv, path)
-        result = e2e.agreement(rows)
+        file_run, rows = await anyio.to_thread.run_sync(e2e.read_human_csv, path)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+    run_id = run_override or file_run
     db = Database(settings.db)
     try:
         async with db.session_factory() as session, session.begin():
@@ -501,17 +734,28 @@ async def cmd_agreement(path: Path) -> int:
             if run is None or run.suite != "e2e":
                 print(f"eval_run #{run_id} 不存在或不是端到端评测", file=sys.stderr)
                 return 2
+            try:
+                result = e2e.agreement(e2e.with_judge(rows, run.details))
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
             # JSONB 整体替换（原地修改字典不会被 SQLAlchemy 发现）
             run.metrics = {
                 **run.metrics,
-                "human": {**result, "checked_at": f"{datetime.now():%Y-%m-%d %H:%M}"},
+                key: {
+                    **result,
+                    "labels": path.name,
+                    "checked_at": f"{datetime.now():%Y-%m-%d %H:%M}",
+                },
             }
     finally:
         await db.dispose()
     print(
-        f"人工标注 {result['n']}/{result['of']} 题：正确性一致率 {result['correctness_agreement']}"
-        f"（kappa {result['correctness_kappa']}），拒答一致率 {result['refused_agreement']}，"
-        f"引用判断一致率 {result['citations_agreement']}；已写入 eval_run #{run_id}"
+        f"人工标注 {result['n']}/{result['of']} 题 vs #{run_id} 的裁判："
+        f"正确性一致率 {result['correctness_agreement']}（kappa {result['correctness_kappa']}），"
+        f"拒答一致率 {result['refused_agreement']}，"
+        f"引用判断一致率 {result['citations_agreement']}；"
+        f"已写入 metrics.{key}"
     )
     return 0
 
@@ -605,6 +849,14 @@ def main() -> None:
     p_e2e.add_argument("--reports-dir", type=Path)
     p_agree = sub.add_parser("agreement", help="人工抽检后计算裁判与人工的一致率")
     p_agree.add_argument("csv", type=Path)
+    p_agree.add_argument("--run", type=int, help="和哪次运行的裁判比，默认文件里的 run_id")
+    p_agree.add_argument("--key", default="human", help="写入 metrics 的键，如 human / human_dev")
+    p_rej = sub.add_parser("rejudge", help="用当前版本的裁判重判某次端到端运行的回答")
+    p_rej.add_argument("run", type=int)
+    p_rej.add_argument("--judge-model", default="qwen-max")
+    p_rej.add_argument("--exclude", type=Path, help="已看过的人工标注 CSV：这些题不进新的抽检样本")
+    p_rej.add_argument("--concurrency", type=int, default=4)
+    p_rej.add_argument("--reports-dir", type=Path)
     p_route = sub.add_parser("routing", help="路由评测（默认测试集）")
     p_route.add_argument(
         "datasets", nargs="*", type=Path, help="默认 RAG__DATA_DIR/eval/routing_test.jsonl"
@@ -625,7 +877,13 @@ def main() -> None:
                 cmd_e2e(args.dataset, args.judge_model, args.reports_dir, args.concurrency)
             )
         elif args.command == "agreement":
-            code = asyncio.run(cmd_agreement(args.csv))
+            code = asyncio.run(cmd_agreement(args.csv, args.run, args.key))
+        elif args.command == "rejudge":
+            code = asyncio.run(
+                cmd_rejudge(
+                    args.run, args.judge_model, args.reports_dir, args.exclude, args.concurrency
+                )
+            )
         else:
             modes = [SearchMode(m) for m in args.modes.split(",")]
             code = asyncio.run(
