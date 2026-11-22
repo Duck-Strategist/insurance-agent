@@ -12,6 +12,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +21,10 @@ RATES_DIR = Path(__file__).with_name("rates")
 # 费率表单元格的含义
 UNIT_PREMIUM = "premium"  # 年交保费（元）
 UNIT_SUM_ASSURED_PER_1000 = "sum_assured_per_1000_premium"  # 每 1000 元年交保费对应的基本保额
-UNITS = (UNIT_PREMIUM, UNIT_SUM_ASSURED_PER_1000)
+UNIT_PREMIUM_PER_1000_SA = "premium_per_1000_sum_assured"  # 每 1000 元基本保额的年交保费
+UNIT_FACTOR = "factor"  # 调整因子（如免赔额因子 2.25 = 225%），与年龄无关，年龄区间记为 [0, 120]
+UNITS = (UNIT_PREMIUM, UNIT_SUM_ASSURED_PER_1000, UNIT_PREMIUM_PER_1000_SA, UNIT_FACTOR)
+FACTOR_AGES = (0, 120)
 
 
 @dataclass(frozen=True)
@@ -33,11 +37,6 @@ class RateItem:
     value: Decimal
     page: int  # PDF 页码（从 1 开始），报价明细里用于追溯
 
-    def matches(self, age: int, key: Mapping[str, str]) -> bool:
-        return self.age_min <= age <= self.age_max and all(
-            self.key.get(k) == v for k, v in key.items()
-        )
-
 
 @dataclass(frozen=True)
 class RateTable:
@@ -47,29 +46,42 @@ class RateTable:
     dims: tuple[str, ...]  # 除年龄外的维度，如 ("gender", "pay_term")
     items: tuple[RateItem, ...]
 
+    @cached_property
+    def _index(self) -> dict[tuple[str, ...], list[RateItem]]:
+        """按维度取值分组（达尔文12号一张表有 4 万多格，逐格扫描太慢）。"""
+        index: dict[tuple[str, ...], list[RateItem]] = {}
+        for item in self.items:
+            index.setdefault(tuple(item.key[d] for d in self.dims), []).append(item)
+        return index
+
     def lookup(self, age: int, **key: str) -> RateItem | None:
         """按年龄和全部维度精确查表；查不到返回 None（该组合不可投保）。"""
         if set(key) != set(self.dims):
             raise ValueError(f"{self.code}: 维度应为 {self.dims}，实际 {tuple(key)}")
-        for item in self.items:
-            if item.matches(age, key):
+        for item in self._index.get(tuple(key[d] for d in self.dims), ()):
+            if item.age_min <= age <= item.age_max:
                 return item
         return None
 
+    @cached_property
+    def _choices(self) -> dict[str, list[str]]:
+        seen: dict[str, dict[str, None]] = {d: {} for d in self.dims}
+        for item in self.items:
+            for d in self.dims:
+                seen[d].setdefault(item.key[d], None)
+        return {d: list(v) for d, v in seen.items()}
+
+    def warm(self) -> None:
+        """提前建好查表索引（解析费率表的线程里调用）。"""
+        _ = self._index, self._choices
+
     def choices(self, dim: str) -> list[str]:
         """某个维度出现过的取值，保持费率表中的顺序。"""
-        seen: dict[str, None] = {}
-        for item in self.items:
-            seen.setdefault(item.key[dim], None)
-        return list(seen)
+        return list(self._choices[dim])
 
     def available(self, dim: str, age: int, **key: str) -> list[str]:
         """在给定年龄和其他维度下，某个维度还能选哪些值（用于提示「可选：趸交、3年交」）。"""
-        return [
-            v
-            for v in self.choices(dim)
-            if any(item.matches(age, {**key, dim: v}) for item in self.items)
-        ]
+        return [v for v in self.choices(dim) if self.lookup(age, **{**key, dim: v}) is not None]
 
     def age_range(self) -> tuple[int, int]:
         return min(i.age_min for i in self.items), max(i.age_max for i in self.items)

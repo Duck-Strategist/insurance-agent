@@ -151,4 +151,50 @@ test('describeParams 生成可读摘要', () => {
     '30 周岁 · 男 · 3年交 · 年交 10000.00 元',
   )
   expect(describeParams({ age: 30, social_security: false, addons: ['drug'] })).toBe('30 周岁 · 无社保')
+  expect(
+    describeParams({
+      age: 30,
+      gender: 'female',
+      pay_term: '30y',
+      sum_assured: '300000.00',
+      coverage: 'to70',
+      multi_pay: 'plan1',
+      options: ['death'],
+    }),
+  ).toBe('30 周岁 · 女 · 30年交 · 保额 300000.00 元 · 保至70岁 · 多次给付方案一')
+})
+
+test('非必填的单选有「不选」，选它时不提交该参数', async () => {
+  const withOptional: PricingInfo = {
+    ...pricing,
+    params: [
+      ...pricing.params,
+      {
+        name: 'multi_pay',
+        label: '重大疾病多次给付',
+        kind: 'choice',
+        required: false,
+        choices: [{ value: 'plan1', label: '方案一' }],
+        min: null,
+        max: null,
+        hint: '',
+      },
+    ],
+  }
+  const fetchMock = mockFetch({
+    '/health': healthOk,
+    '/api/v1/products/7/pricing': () => jsonResponse(withOptional),
+    '/api/v1/products/7/quote': () => jsonResponse(ok),
+    '/api/v1/products/7': () => jsonResponse(product),
+  })
+  renderAt('/products/7')
+  fireEvent.change(await screen.findByRole('spinbutton'), { target: { value: '30' } })
+  fireEvent.click(screen.getByRole('radio', { name: '男' }))
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: '10000' } })
+  fireEvent.click(screen.getByRole('radio', { name: '方案一' }))
+  fireEvent.click(screen.getByRole('radio', { name: '不选' }))
+  fireEvent.click(screen.getByRole('button', { name: '计算保费' }))
+  await screen.findByText('¥28,180')
+  const call = fetchMock.mock.calls.find(([u]) => String(u).endsWith('/quote'))!
+  expect(JSON.parse(String(call[1]?.body)).params).not.toHaveProperty('multi_pay')
 })

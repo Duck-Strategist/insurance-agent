@@ -259,3 +259,173 @@ def test_expect_header_mismatch_fails() -> None:
     with pytest.raises(extract.ExtractError):
         extract._expect(["性别", "女", None], ["性别", "男"], "x")
     extract._expect(["性别", "男 ", None], ["性别", "男", None], "x")
+
+
+# ---------- 第二批：重疾长表、星相守公式型 ----------
+
+DW = BOOKS["达尔文12号重大疾病保险"]
+YL = BOOKS["复星联合医联有盟重疾险"]
+XS = BOOKS["复星联合星相守2号长期医疗险（个人版）"]
+DW_PARAMS = {
+    "age": 30,
+    "gender": "male",
+    "pay_term": "20y",
+    "sum_assured": "300000",
+    "coverage": "life",
+}
+
+
+def test_darwin_plan_mapping() -> None:
+    from app.pricing.engine import _darwin_plan
+
+    life = {"coverage": "life", "multi_pay": None}
+    assert _darwin_plan({**life, "options": []}) == "1"
+    assert _darwin_plan({**life, "options": [], "multi_pay": "plan2"}) == "3"
+    assert _darwin_plan({**life, "options": ["pillar_care"]}) == "4"
+    assert _darwin_plan({**life, "options": ["cancer_allowance"]}) == "13"
+    assert _darwin_plan({**life, "options": ["disease_care"]}) == "25"
+    assert _darwin_plan({**life, "options": ["death"]}) == "49"
+    all_life = ["death", "disease_care", "cancer_allowance", "premium_compensation", "pillar_care"]
+    assert _darwin_plan({**life, "options": all_life, "multi_pay": "plan2"}) == "96"
+    assert _darwin_plan({"coverage": "to70", "options": ["death", "pillar_care"]}) == "102"
+
+
+def test_darwin_sum_assured_must_be_multiple_of_1000() -> None:
+    result = quote(DW, {**DW_PARAMS, "sum_assured": "300500"})
+    assert result.status == "invalid"
+    assert "1,000 元的整数倍" in result.messages[0]
+
+
+def test_darwin_to70_rejects_life_only_options() -> None:
+    params = {**DW_PARAMS, "coverage": "to70", "options": ["disease_care", "death"]}
+    result = quote(DW, params)
+    assert result.status == "ineligible"
+    assert result.messages == ["保至70岁计划不含：疾病关爱保险金"]
+
+
+def test_darwin_quote_multiplies_rate_by_sum_assured() -> None:
+    result = quote(DW, DW_PARAMS)
+    assert result.status == "ok"
+    assert result.annual_premium == Decimal("5472.00")  # 18.24 × 300
+    assert result.pay_years == 20 and result.total_premium == Decimal("109440.00")
+    assert result.sum_assured == Decimal("300000")
+    assert "计划 1" in result.lines[0].basis and "第 231 页" in result.lines[0].basis
+
+
+def test_yilian_sum_assured_choices_come_from_table() -> None:
+    specs = {s.name: s for s in rule_for(YL.product).param_specs(YL)}  # type: ignore[union-attr]
+    assert specs["sum_assured"].choices == (
+        ("100000", "10 万元"),
+        ("150000", "15 万元"),
+        ("200000", "20 万元"),
+    )
+    result = quote(YL, {"age": 30, "gender": "male", "pay_term": "10y", "social_security": True,
+                        "sum_assured": "120000"})  # fmt: skip
+    assert result.status == "invalid"
+
+
+def test_ci_check_catches_swapped_plans() -> None:
+    """把计划 1（不含可选责任）和计划 49（含身故）的保费对调，模拟计划映射写错。"""
+    swap = {"1": "49", "49": "1"}
+    items = [
+        dataclasses.replace(i, key={**i.key, "plan": swap[i.key["plan"]]})
+        if i.key["plan"] in swap
+        else i
+        for i in DW.table("base").items
+    ]
+    broken = _replace_items(DW, "base", items)
+    assert check_structure(broken) == []
+    problems = rule_for(DW.product).check(broken)  # type: ignore[union-attr]
+    assert any("加选责任后" in p for p in problems)
+
+
+def test_ci_check_catches_swapped_pay_terms() -> None:
+    swap = {"10y": "20y", "20y": "10y"}
+    items = [
+        dataclasses.replace(i, key={**i.key, "pay_term": swap[i.key["pay_term"]]})
+        if i.key["pay_term"] in swap
+        else i
+        for i in YL.table("base").items
+    ]
+    broken = _replace_items(YL, "base", items)
+    problems = rule_for(YL.product).check(broken)  # type: ignore[union-attr]
+    assert any("不低于" in p for p in problems)
+
+
+def test_xiangshou_deductible_factor_applies_to_base_only() -> None:
+    params = {
+        "age": 30,
+        "plan": "计划一",
+        "social_security": True,
+        "deductible": "0",
+        "addons": ["basic_medical"],
+    }
+    result = quote(XS, params)
+    assert result.status == "ok"
+    base, basic = result.lines
+    assert base.premium == Decimal("414.00")  # 184 × 225%
+    assert "调整因子 225%" in base.basis
+    assert basic.premium == Decimal("139.00")  # 可选责任不乘因子
+
+
+def test_xiangshou_check_catches_swapped_factors() -> None:
+    items = [
+        dataclasses.replace(
+            i, key={**i.key, "deductible": "10000" if i.key["deductible"] == "0" else "0"}
+        )
+        for i in XS.table("deductible").items
+    ]
+    broken = _replace_items(XS, "deductible", items)
+    problems = rule_for(XS.product).check(broken)  # type: ignore[union-attr]
+    assert any("免赔额因子未随免赔额递减" in p for p in problems)
+
+
+def test_xiangshou_param_specs() -> None:
+    specs = {s.name: s for s in rule_for(XS.product).param_specs(XS)}  # type: ignore[union-attr]
+    assert specs["plan"].choices == (("计划一", "计划一"), ("计划二", "计划二"))
+    assert specs["deductible"].choices == (("0", "0 元"), ("10000", "1 万元"))
+    assert (specs["age"].min, specs["age"].max) == (0, 70)
+
+
+def test_choice_accepts_numbers() -> None:
+    params = {"age": 30, "gender": "male", "pay_term": "10y", "social_security": True}
+    result = quote(YL, {**params, "sum_assured": 100000})
+    assert result.status == "ok", result.messages
+    assert result.params["sum_assured"] == "100000"
+    assert quote(YL, {**params, "sum_assured": True}).status == "invalid"
+
+
+@pytest.mark.parametrize(
+    ("func", "rows", "message"),
+    [
+        (
+            "extract_yilian",
+            [
+                (2, ["基本保险金额", "计划", "性别", "交费期", "投保年龄", "保险费"]),
+                (2, ["100000", "1", "男", "10年交", "0", "3143", "00"]),
+            ],
+            "应有 6 个字段",
+        ),
+        (
+            "extract_darwin",
+            [(2, ["终身", "1", "男", "趸交", "0", "1", "73.42", "1", "2", "3", "4"])],
+            "应有 10 个字段",
+        ),
+    ],
+)
+def test_long_table_rows_with_wrong_field_count_fail(
+    monkeypatch: pytest.MonkeyPatch, func: str, rows: list[tuple[int, list[str]]], message: str
+) -> None:
+    """字段被拆开的数据行必须让提取失败，不能悄悄丢掉（列首列尾少一格时结构校验发现不了）。"""
+    from pathlib import Path
+
+    monkeypatch.setattr(extract, "_long_rows", lambda _pdf: rows)
+    with pytest.raises(extract.ExtractError, match=message):
+        getattr(extract, func)(Path("x.pdf"))
+
+
+def test_parsed_book_has_indexes_built() -> None:
+    from app.services.pricing_service import _parse_book
+
+    book = _parse_book(json.loads(dumps_book(XH)), "v")
+    assert "_index" in vars(book.table("base")) and "_choices" in vars(book.table("base"))

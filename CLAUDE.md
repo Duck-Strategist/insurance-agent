@@ -2,7 +2,7 @@
 
 安心保 · 智能保险顾问：RAG + LangGraph 的保险顾问 Agent（学习 + 面试作品项目）。
 
-- 设计与决策：[docs/SPEC.md](docs/SPEC.md)（决策 D1–D43、里程碑 M0–M9、风险 Q1–Q18）。做设计取舍前先查，取舍定了就补一条决策。
+- 设计与决策：[docs/SPEC.md](docs/SPEC.md)（决策 D1–D45、里程碑 M0–M9、风险 Q1–Q18）。做设计取舍前先查，取舍定了就补一条决策。
 - 面试故事集：[docs/INTERVIEW.md](docs/INTERVIEW.md)。每个里程碑结束后补充（见「工作流程」）。
 - 参考实现 `../hm-insurance/` 是教学项目，只读对照，不复制代码，它的 `.env` 里有泄露过的密钥，不要使用。
 
@@ -98,6 +98,9 @@ npm run lint ; npx tsc -b ; npm run test ; npm run build
 - 提取按单元格位置，不按空格切文本；新增提取函数必须先核对表头文字（`_expect`），并让规则的 `check` 有能发现列错位的业务校验（D43）。
 - 重新提取后审查 JSON 的 diff；`tests/test_pricing_samples.py` 的期望值要对照 PDF 页面图像人工读出，**不能从提取结果里抄**。新增产品时至少补：每张表的首尾行、每个维度、空白格（应不可投保）。
 - 金额参数只接受字符串或整数（拒绝 float）；保额四舍五入到分。保存报价时服务端重新计算，不信任前端传来的金额。
+- 几百页的长表用 `extract._long_rows`（pypdfium2 字符坐标拼行），按字符底边分行；重疾的「责任组合 → 计划编号」写在规则里，提取时要和 PDF 的计划对照表核对。
+- 报价从 `PricingService.current_book` 取费率表（按 `rate_books.id` 缓存），不要直接读 `RateBookRecord.content`：达尔文12号一份 6 MB。
+- 费率表里看不出区别的产品版本（如星相守转保版）不报价，不按猜测套用别的列。
 
 ## 前端约定
 

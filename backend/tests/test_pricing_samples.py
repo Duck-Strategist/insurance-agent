@@ -21,6 +21,47 @@ ZA = "众安尊享e生百万医疗险2026版"
 ZY = "中英人寿福满佳C款（悦享版）"
 FYY = "太保福有余2025"
 XH = "新华人寿E增福优享版"
+YL = "复星联合医联有盟重疾险"
+DW = "达尔文12号重大疾病保险"
+XS = "复星联合星相守2号长期医疗险（个人版）"
+
+
+def _yl(sa: str, opts: list[str], ss: bool, gender: str, term: str, age: int) -> dict[str, Any]:
+    return {
+        "sum_assured": sa,
+        "options": opts,
+        "social_security": ss,
+        "gender": gender,
+        "pay_term": term,
+        "age": age,
+    }
+
+
+def _dw(coverage: str, opts: list[str], multi: str | None, gender: str, term: str, age: int,
+        sa: str = "1000") -> dict[str, Any]:  # fmt: skip
+    return {
+        "coverage": coverage,
+        "options": opts,
+        "multi_pay": multi,
+        "gender": gender,
+        "pay_term": term,
+        "age": age,
+        "sum_assured": sa,
+    }
+
+
+def _xs(plan: str, ss: bool, deductible: str, age: int, addons: list[str] | None = None
+        ) -> dict[str, Any]:  # fmt: skip
+    return {
+        "plan": plan,
+        "social_security": ss,
+        "deductible": deductible,
+        "age": age,
+        "addons": addons or [],
+    }
+
+
+M, F = "male", "female"
 
 # (产品, 参数, 期望年交保费)
 PREMIUM_POINTS: list[tuple[str, dict[str, Any], str]] = [
@@ -59,6 +100,66 @@ PREMIUM_POINTS: list[tuple[str, dict[str, Any], str]] = [
         },
         str(318 + 598 + 141 + 99),
     ),
+    # 医联有盟（第 2、90、178 页）：计划 = 1 + 轻中症 + 2×身故 + 4×无医保；保额 10/15/20 万
+    (YL, _yl("100000", [], True, M, "10y", 0), "3143.00"),  # 计划1
+    (YL, _yl("100000", ["mild_moderate", "death"], True, M, "10y", 1), "4683.00"),  # 计划4
+    (YL, _yl("100000", [], False, M, "10y", 2), "3223.00"),  # 计划5
+    (YL, _yl("100000", ["mild_moderate", "death"], False, M, "10y", 5), "4969.00"),  # 计划8
+    (YL, _yl("100000", ["mild_moderate"], True, M, "10y", 6), "3870.00"),  # 计划2
+    (YL, _yl("150000", ["mild_moderate"], False, M, "30y", 40), "4343.50"),  # 计划6
+    (YL, _yl("150000", ["death"], True, F, "10y", 0), "5447.00"),  # 计划3
+    (YL, _yl("150000", ["death"], False, F, "10y", 4), "5792.50"),  # 计划7
+    (YL, _yl("150000", [], True, F, "10y", 6), "4180.50"),  # 计划1
+    (YL, _yl("200000", ["death"], False, F, "30y", 40), "5901.00"),  # 计划7
+    (YL, _yl("200000", ["mild_moderate", "death"], False, F, "30y", 40), "6818.00"),  # 计划8
+    # 达尔文12号（第 2、231、600、877 页）：保额 1000 元时保费 = 每千元费率
+    (DW, _dw("life", [], None, M, "single", 0), "173.42"),  # 计划1
+    (DW, _dw("life", [], None, M, "single", 50), "425.63"),
+    (DW, _dw("life", [], None, M, "20y", 30), "18.24"),
+    (DW, _dw("life", [], None, M, "20y", 30, sa="300000"), "5472.00"),  # 18.24 × 300
+    (DW, _dw("life", [], "plan1", M, "20y", 0), "11.31"),  # 计划2
+    (DW, _dw("life", [], "plan1", M, "20y", 30), "20.22"),
+    (DW, _dw("life", ["death"], None, F, "10y", 21), "42.95"),  # 计划49
+    (DW, _dw("life", ["death"], None, F, "10y", 55), "80.86"),
+    (DW, _dw("life", ["death"], "plan1", F, "10y", 0), "30.84"),  # 计划50
+    (DW, _dw("life", ["death"], "plan1", F, "10y", 22), "46.89"),
+    # 第 264 页：计划 48 在第 1 页计划表里折行读不出，用它独立验证混合进制映射
+    (
+        DW,
+        _dw(
+            "life",
+            ["disease_care", "cancer_allowance", "premium_compensation", "pillar_care"],
+            "plan2",
+            M,
+            "20y",
+            35,
+        ),
+        "35.23",
+    ),  # fmt: skip
+    (DW, _dw("life", ["death"], None, M, "20y", 30), "30.12"),  # 计划49
+    (
+        DW,
+        _dw("to70", ["death", "premium_compensation", "pillar_care"], None, F, "20y", 44),
+        "14.87",
+    ),
+    (DW, _dw("to70", [], None, F, "20y", 45), "11.50"),  # 计划97
+    (DW, _dw("to70", ["premium_compensation"], None, F, "20y", 45), "12.69"),  # 计划99
+    (DW, _dw("to70", ["death", "pillar_care"], None, F, "20y", 45), "13.60"),  # 计划102
+    # 星相守2号个人版（第 1–3、6、14、16 页及 4/8/12 页首行）：必选责任 = 基准费率 × 免赔额因子
+    (XS, _xs("计划一", True, "10000", 30), "184.00"),  # 因子 100%
+    (XS, _xs("计划一", True, "0", 30), "414.00"),  # 184 × 225%
+    (XS, _xs("计划一", False, "0", 0), "1310.95"),  # 785 × 167%
+    (XS, _xs("计划二", True, "0", 59), "6209.06"),  # 3718 × 167%
+    (XS, _xs("计划二", False, "10000", 7), "1613.00"),
+    (XS, _xs("计划一", True, "10000", 70), "2982.00"),
+    (XS, _xs("计划二", False, "10000", 70), "8445.00"),
+    (XS, _xs("计划一", True, "10000", 30, ["basic_medical"]), str(184 + 139)),
+    (XS, _xs("计划二", False, "10000", 46, ["basic_medical"]), str(2532 + 1276)),
+    (XS, _xs("计划一", True, "10000", 35, ["ci_allowance"]), str(269 + 77)),
+    (XS, _xs("计划二", False, "10000", 49, ["outpatient"]), str(2546 + 5917)),
+    (XS, _xs("计划一", True, "0", 0, ["outpatient"]), "1784.25"),  # 341 × 225% + 1017
+    (XS, _xs("计划一", False, "10000", 13, ["ci_rehab", "cancer_drug"]), str(330 + 5 + 28)),
+    (XS, _xs("计划一", True, "10000", 9, ["ci_special_care"]), str(142 + 41)),
 ]
 
 # (产品, 年龄, 性别, 交费期, 每千元年交保费对应的基本保额)
@@ -102,6 +203,12 @@ INELIGIBLE_POINTS: list[tuple[str, dict[str, Any]]] = [
     (ZA, {"age": 71, "social_security": True}),  # 71 岁以上仅限续保
     (XMF, {"age": 17, "plan": "经典版"}),
     (XXT, {"age": 25, "plan": "基础版"}),
+    (YL, _yl("200000", [], True, F, "30y", 41)),  # 30 年交到 40 岁
+    (DW, _dw("life", ["death"], None, F, "10y", 56)),  # 10 年交到 55 岁
+    (DW, _dw("to70", [], None, F, "20y", 46)),  # 保至70岁 20 年交到 45 岁
+    (DW, _dw("to70", ["disease_care"], None, F, "20y", 30)),  # 保至70岁不含疾病关爱
+    (DW, _dw("to70", [], "plan1", F, "20y", 30)),  # 保至70岁不含多次给付
+    (XS, _xs("计划一", True, "10000", 71)),  # 「有等待期」列到 70 岁
 ]
 
 
@@ -110,7 +217,7 @@ def test_premium_points(product: str, params: dict[str, Any], expected: str) -> 
     result = quote(BOOKS[product], params)
     assert result.status == "ok", result.messages
     assert result.annual_premium == Decimal(expected)
-    assert result.total_premium == Decimal(expected)  # 一年期，交一次
+    assert result.total_premium == Decimal(expected) * (result.pay_years or 1)
 
 
 @pytest.mark.parametrize(("product", "age", "gender", "pay_term", "per_1000"), SUM_ASSURED_POINTS)

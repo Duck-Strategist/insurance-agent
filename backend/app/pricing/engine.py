@@ -8,13 +8,16 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, Literal
 
 from app.pricing.tables import (
+    FACTOR_AGES,
+    UNIT_FACTOR,
     UNIT_PREMIUM,
+    UNIT_PREMIUM_PER_1000_SA,
     UNIT_SUM_ASSURED_PER_1000,
     RateBook,
     RateItem,
@@ -33,7 +36,10 @@ PAY_TERMS: dict[str, tuple[str, int]] = {
     "6y": ("6年交", 6),
     "9y": ("9年交", 9),
     "10y": ("10年交", 10),
+    "15y": ("15年交", 15),
     "20y": ("20年交", 20),
+    "30y": ("30年交", 30),
+    "35y": ("35年交", 35),
 }
 MAX_AGE = 120
 # 年交保费上限只用来挡住明显的输入错误（如多输了几个 0），不是产品规则
@@ -107,6 +113,8 @@ def _parse_bool(value: Any, label: str) -> bool:
 
 def _parse_choice(value: Any, spec: ParamSpec) -> str:
     allowed = {v for v, _ in spec.choices}
+    if isinstance(value, int) and not isinstance(value, bool):
+        value = str(value)  # 保额档位等取值是数字字符串，调用方（如 Agent）可能直接传数字
     if not isinstance(value, str) or value not in allowed:
         labels = "、".join(label for _, label in spec.choices)
         raise _Invalid(f"{spec.label}只能选：{labels}")
@@ -288,52 +296,108 @@ class FixedPlanRule(ProductRule):
 class Addon:
     code: str  # 费率表 code，同时是可选责任的取值
     title: str
-    max_new_age: int  # 首次投保的最高年龄（费率表里更高年龄的行只适用于续保）
+    # 首次投保的最高年龄。众安的表里更高年龄的行只适用于续保，必须在规则里限制；
+    # None 表示以费率表为准（星相守只提取了「有等待期」即首次投保的列）
+    max_new_age: int | None = None
+
+
+DEDUCTIBLE_TABLE = "deductible"
+
+
+def _deductible_label(value: str) -> str:
+    amount = int(value)
+    return f"{amount // 10000} 万元" if amount and amount % 10000 == 0 else f"{amount:,} 元"
 
 
 @dataclass(frozen=True)
 class MedicalRule(ProductRule):
-    """百万医疗：必选计划按「年龄段 × 社保」，可选加油包逐项相加。只报首次投保的个人单价格。"""
+    """长期/百万医疗：必选责任按「年龄 × [计划] × 社保」查表，可选责任逐项相加。
 
-    max_new_age: int
+    - 有 deductible 表时（星相守），必选责任 = 基准费率 × 免赔额调整因子，因子只用于必选责任。
+    - 只报首次投保、个人单、标准体的价格。
+    """
+
+    max_new_age: int | None
     addons: tuple[Addon, ...]
     base: str = "base"
     newborn_note: str = ""
 
     def param_specs(self, book: RateBook) -> list[ParamSpec]:
         t = book.table(self.base)
-        return [
-            _age_spec(t, self.max_new_age, self.newborn_note),
-            ParamSpec("social_security", "是否有社保", "bool"),
+        specs = [_age_spec(t, self.max_new_age, self.newborn_note)]
+        if "plan" in t.dims:
+            plans = tuple((p, p) for p in t.choices("plan"))
+            specs.append(ParamSpec("plan", "保障计划", "choice", choices=plans))
+        specs.append(ParamSpec("social_security", "是否有社保", "bool"))
+        if DEDUCTIBLE_TABLE in book.tables:
+            values = book.table(DEDUCTIBLE_TABLE).choices("deductible")
+            specs.append(
+                ParamSpec(
+                    "deductible",
+                    "年免赔额",
+                    "choice",
+                    choices=tuple((v, _deductible_label(v)) for v in values),
+                )
+            )
+        specs.append(
             ParamSpec(
                 "addons",
                 "可选责任",
                 "multi",
                 required=False,
                 choices=tuple((a.code, a.title) for a in self.addons),
-            ),
-        ]
+            )
+        )
+        return specs
 
-    def _key(self, table: RateTable, params: dict[str, Any]) -> dict[str, str]:
+    @staticmethod
+    def _key(table: RateTable, params: dict[str, Any]) -> dict[str, str]:
         key: dict[str, str] = {}
-        if "social_security" in table.dims:
-            key["social_security"] = "yes" if params["social_security"] else "no"
+        for dim in table.dims:
+            if dim == "social_security":
+                key[dim] = "yes" if params["social_security"] else "no"
+            else:  # plan、deductible
+                key[dim] = params[dim]
         return key
 
-    def _line(self, table: RateTable, item: RateItem, key: dict[str, str]) -> QuoteLine:
-        dims = " ".join(SOCIAL_SECURITY_LABELS[v] for v in key.values())
-        basis = f"费率表第 {item.page} 页：{_age_text(item)} {dims} {_fmt(item.value)} 元"
+    @staticmethod
+    def _dims_text(key: dict[str, str]) -> str:
+        parts = []
+        for dim, value in key.items():
+            if dim == "social_security":
+                parts.append(SOCIAL_SECURITY_LABELS[value])
+            elif dim == "deductible":
+                parts.append(f"免赔额 {_deductible_label(value)}")
+            else:
+                parts.append(value)
+        return " ".join(parts)
+
+    def _line(
+        self,
+        table: RateTable,
+        item: RateItem,
+        key: dict[str, str],
+        factor: tuple[RateItem, dict[str, str]] | None = None,
+    ) -> QuoteLine:
+        where = " ".join(p for p in (_age_text(item), self._dims_text(key)) if p)
+        if factor is None:
+            premium = item.value
+            basis = f"费率表第 {item.page} 页：{where} {_fmt(item.value)} 元"
+        else:
+            f_item, f_key = factor
+            premium = (item.value * f_item.value).quantize(CENT, rounding=ROUND_HALF_UP)
+            basis = (
+                f"费率表第 {item.page} 页：{where} 基准费率 {_fmt(item.value)} 元 × "
+                f"{self._dims_text({'deductible': f_key['deductible']})} 调整因子 "
+                f"{f_item.value * 100:.0f}%（第 {f_item.page} 页）= {_fmt(premium)} 元"
+            )
         return QuoteLine(
-            code=table.code,
-            title=table.title,
-            premium=item.value,
-            basis=basis.replace("  ", " "),
-            page=item.page,
+            code=table.code, title=table.title, premium=premium, basis=basis, page=item.page
         )
 
     def _compute(self, book: RateBook, params: dict[str, Any], result: QuoteResult) -> None:
         age = params["age"]
-        if age > self.max_new_age:
+        if self.max_new_age is not None and age > self.max_new_age:
             _ineligible(result, f"首次投保年龄最高 {self.max_new_age} 周岁，更高年龄仅限续保")
             return
         base = book.table(self.base)
@@ -343,17 +407,30 @@ class MedicalRule(ProductRule):
             lo, hi = base.age_range()
             _ineligible(result, f"{age} 周岁不在投保年龄 {lo}–{hi} 周岁内")
             return
-        result.lines.append(self._line(base, item, key))
+        factor = None
+        if DEDUCTIBLE_TABLE in book.tables:
+            f_table = book.table(DEDUCTIBLE_TABLE)
+            f_key = self._key(f_table, params)
+            f_item = f_table.lookup(FACTOR_AGES[0], **f_key)
+            if f_item is None:
+                _ineligible(result, f"{self._dims_text(f_key)} 没有对应的免赔额调整因子")
+                return
+            factor = (f_item, f_key)
+        result.lines.append(self._line(base, item, key, factor))
         by_code = {a.code: a for a in self.addons}
         for code in params["addons"]:
             addon = by_code[code]
             table = book.table(code)
             key = self._key(table, params)
             item = table.lookup(age, **key)
-            if age > addon.max_new_age or item is None:
-                _ineligible(
-                    result, f"{addon.title}首次投保最高 {addon.max_new_age} 周岁，{age} 周岁不能选"
-                )
+            too_old = addon.max_new_age is not None and age > addon.max_new_age
+            if too_old or item is None:
+                if addon.max_new_age is not None:
+                    limit = f"首次投保最高 {addon.max_new_age} 周岁"
+                else:
+                    lo, hi = table.age_range()
+                    limit = f"投保年龄 {lo}–{hi} 周岁"
+                _ineligible(result, f"{addon.title}{limit}，{age} 周岁不能选")
                 continue
             result.lines.append(self._line(table, item, key))
 
@@ -365,21 +442,35 @@ class MedicalRule(ProductRule):
             return problems
         for code in sorted(codes):
             t = book.table(code)
-            if not set(t.dims) <= {"social_security"}:
-                problems.append(f"{book.product}/{code}: 不支持的维度 {t.dims}")
+            if t.unit != UNIT_PREMIUM or not set(t.dims) <= {"social_security", "plan"}:
+                problems.append(f"{book.product}/{code}: 不支持的单位或维度 {t.unit} {t.dims}")
                 continue
             if "social_security" not in t.dims:
                 continue
-            # 同一年龄段，无社保的价格不应低于有社保
+            # 同一年龄、同一计划，无社保的价格不应低于有社保
             for item in t.items:
                 if item.key["social_security"] != "yes":
                     continue
-                other = t.lookup(item.age_min, social_security="no")
+                other = t.lookup(item.age_min, **{**item.key, "social_security": "no"})
                 if other is not None and other.value < item.value:
                     problems.append(
-                        f"{book.product}/{code}: {item.age_min} 周岁无社保 {other.value} "
-                        f"低于有社保 {item.value}"
+                        f"{book.product}/{code}: {item.age_min} 周岁 {dict(item.key)} "
+                        f"无社保 {other.value} 低于有社保 {item.value}"
                     )
+        if DEDUCTIBLE_TABLE in book.tables:
+            f = book.table(DEDUCTIBLE_TABLE)
+            if f.unit != UNIT_FACTOR or set(f.dims) != {"deductible", *book.table(self.base).dims}:
+                problems.append(f"{book.product}: 免赔额因子表的单位或维度不对 {f.unit} {f.dims}")
+            # 免赔额越低，因子越高（同一计划、同一社保情况）
+            groups: dict[tuple[str, ...], list[RateItem]] = {}
+            for item in f.items:
+                rest = tuple(v for k, v in sorted(item.key.items()) if k != "deductible")
+                groups.setdefault(rest, []).append(item)
+            for rest, items in groups.items():
+                ordered = sorted(items, key=lambda i: int(i.key["deductible"]))
+                values = [i.value for i in ordered]
+                if values != sorted(values, reverse=True):
+                    problems.append(f"{book.product}: 免赔额因子未随免赔额递减 {rest} {values}")
         return problems
 
 
@@ -466,6 +557,292 @@ class LifeRule(ProductRule):
         return problems
 
 
+class NotOffered(Exception):
+    """所选责任组合没有对应的计划（如「保至70岁」不含疾病关爱）。消息直接给用户看。"""
+
+
+@dataclass(frozen=True)
+class CriticalIllnessRule(ProductRule):
+    """重疾险：费率表按「计划 × 性别 × 交费期 × 年龄 [× 保额]」排成长表。
+
+    计划编号由可选责任的组合决定（plan_of），映射写在代码里，提取时与 PDF 的计划对照表逐行核对。
+    - 表里有 sum_assured 维度（医联有盟）：保额只能选表里的档位，单元格就是保费；
+    - 否则（达尔文12号）单元格是每 1000 元保额的费率，保费 = 费率 × 保额 ÷ 1000，四舍五入到分。
+    """
+
+    options: tuple[tuple[str, str], ...]  # 可选责任（多选）：(取值, 展示名)
+    plan_of: Callable[[dict[str, Any]], str]  # 参数 → 计划编号；组合不存在时抛 NotOffered
+    extra_params: tuple[ParamSpec, ...] = ()  # 影响计划的其他参数（社保、保障期间、多次给付）
+    table: str = "base"
+    sum_assured_step: int = 1000  # 按每千元保额计费时，保额须是它的整数倍
+
+    def _per_1000(self, book: RateBook) -> bool:
+        return "sum_assured" not in book.table(self.table).dims
+
+    def param_specs(self, book: RateBook) -> list[ParamSpec]:
+        t = book.table(self.table)
+        specs = [
+            _age_spec(t),
+            ParamSpec("gender", "性别", "choice", choices=tuple(GENDER_LABELS.items())),
+            ParamSpec(
+                "pay_term",
+                "交费期",
+                "choice",
+                choices=tuple((c, PAY_TERMS[c][0]) for c in t.choices("pay_term")),
+            ),
+        ]
+        if self._per_1000(book):
+            specs.append(
+                ParamSpec(
+                    "sum_assured",
+                    "基本保额（元）",
+                    "money",
+                    hint=f"须为 {self.sum_assured_step:,} 元的整数倍；保额上限以投保页面为准",
+                )
+            )
+        else:
+            values = sorted(t.choices("sum_assured"), key=int)
+            specs.append(
+                ParamSpec(
+                    "sum_assured",
+                    "基本保额",
+                    "choice",
+                    choices=tuple((v, f"{int(v) // 10000} 万元") for v in values),
+                )
+            )
+        specs.extend(self.extra_params)
+        specs.append(
+            ParamSpec("options", "可选责任", "multi", required=False, choices=self.options)
+        )
+        return specs
+
+    def _compute(self, book: RateBook, params: dict[str, Any], result: QuoteResult) -> None:
+        t = book.table(self.table)
+        per_1000 = self._per_1000(book)
+        if per_1000:
+            sa: Decimal = params["sum_assured"]
+            if sa % self.sum_assured_step != 0:
+                result.status = "invalid"
+                result.messages.append(f"基本保额须为 {self.sum_assured_step:,} 元的整数倍")
+                return
+        try:
+            plan = self.plan_of(params)
+        except NotOffered as e:
+            _ineligible(result, str(e))
+            return
+        age, gender, pay_term = params["age"], params["gender"], params["pay_term"]
+        key = {"plan": plan, "gender": gender, "pay_term": pay_term}
+        if not per_1000:
+            key["sum_assured"] = params["sum_assured"]
+        item = t.lookup(age, **key)
+        if item is None:
+            rest = {k: v for k, v in key.items() if k != "pay_term"}
+            options = t.available("pay_term", age, **rest)
+            if options:
+                labels = "、".join(PAY_TERMS[o][0] for o in options)
+                _ineligible(result, f"{age} 周岁不能选{PAY_TERMS[pay_term][0]}，可选：{labels}")
+            else:
+                lo, hi = t.age_range()
+                _ineligible(result, f"{age} 周岁不在投保年龄 {lo}–{hi} 周岁内")
+            return
+        label, years = PAY_TERMS[pay_term]
+        where = f"计划 {plan} {_age_text(item)} {GENDER_LABELS[gender]} {label}"
+        if per_1000:
+            premium = (item.value * sa / 1000).quantize(CENT, rounding=ROUND_HALF_UP)
+            basis = (
+                f"费率表第 {item.page} 页：{where} 每 1,000 元保额 {_fmt(item.value)} 元；"
+                f"{_fmt(sa)} ÷ 1,000 × {_fmt(item.value)} = {_fmt(premium)} 元"
+            )
+            result.sum_assured = sa
+        else:
+            premium = item.value
+            sa_text = _fmt(Decimal(params["sum_assured"]))
+            basis = f"费率表第 {item.page} 页：{where} 保额 {sa_text} 元 {_fmt(premium)} 元"
+            result.sum_assured = Decimal(params["sum_assured"]).quantize(CENT)
+        result.pay_years = years
+        result.lines.append(
+            QuoteLine(
+                code=self.table,
+                title=f"{t.title}（{self._coverage_text(params)}）",
+                premium=premium,
+                basis=basis,
+                page=item.page,
+            )
+        )
+
+    def _coverage_text(self, params: dict[str, Any]) -> str:
+        """所选责任的文字说明，写进明细标题：保存的报价不用查计划编号也知道保了什么。"""
+        parts = []
+        for spec in self.extra_params:
+            value = params.get(spec.name)
+            if spec.kind == "bool":
+                parts.append(f"{spec.label}：{'是' if value else '否'}")
+            elif value is not None:
+                parts.append(f"{spec.label}：{dict(spec.choices)[value]}")
+        names = dict(self.options)
+        chosen = [names[o] for o in params.get("options", [])]
+        parts.append("含" + "、".join(chosen) if chosen else "仅必选责任")
+        return "；".join(parts)
+
+    def _combos(self) -> list[dict[str, Any]]:
+        """可选责任与额外参数的全部组合（用于校验）。"""
+        combos: list[dict[str, Any]] = [{"options": []}]
+        for spec in self.extra_params:
+            if spec.kind == "bool":
+                values: list[Any] = [True, False]
+            else:
+                values = [v for v, _ in spec.choices] + ([] if spec.required else [None])
+            combos = [{**c, spec.name: v} for c in combos for v in values]
+        codes = [c for c, _ in self.options]
+        out = []
+        for c in combos:
+            for mask in range(1 << len(codes)):
+                out.append(
+                    {**c, "options": [code for i, code in enumerate(codes) if mask >> i & 1]}
+                )
+        return out
+
+    def check(self, book: RateBook) -> list[str]:
+        t = book.table(self.table)
+        problems: list[str] = []
+        expected_dims = {"plan", "gender", "pay_term"} | (
+            set() if self._per_1000(book) else {"sum_assured"}
+        )
+        expected_unit = UNIT_PREMIUM_PER_1000_SA if self._per_1000(book) else UNIT_PREMIUM
+        if set(t.dims) != expected_dims or t.unit != expected_unit:
+            return [f"{book.product}: 重疾表应为 {expected_unit} × {sorted(expected_dims)}"]
+        if unknown := set(t.choices("pay_term")) - set(PAY_TERMS):
+            return [f"{book.product}: 未知交费期 {sorted(unknown)}"]
+        values = {(tuple(sorted(i.key.items())), i.age_min): i.value for i in t.items}
+
+        # 1. 计划映射：每个组合都映射到表里存在的计划，且每个计划都被用到
+        plans_used: set[str] = set()
+        pairs: set[tuple[str, str]] = set()
+        for combo in self._combos():
+            try:
+                plan = self.plan_of(combo)
+            except NotOffered:
+                continue
+            plans_used.add(plan)
+            # 多选一个可选责任，计划应该更贵（发现计划编号映射错位）
+            for code, _ in self.options:
+                if code in combo["options"]:
+                    continue
+                try:
+                    richer = self.plan_of({**combo, "options": [*combo["options"], code]})
+                except NotOffered:
+                    continue
+                pairs.add((plan, richer))
+        if missing := set(t.choices("plan")) - plans_used:
+            problems.append(f"{book.product}: 计划 {sorted(missing, key=int)} 没有对应的责任组合")
+        if extra := plans_used - set(t.choices("plan")):
+            problems.append(f"{book.product}: 责任组合映射到不存在的计划 {sorted(extra, key=int)}")
+        for (key, age), value in values.items():
+            k = dict(key)
+            for lower, higher in pairs:
+                if k["plan"] != lower:
+                    continue
+                other = values.get((tuple(sorted({**k, "plan": higher}.items())), age))
+                if other is not None and other <= value:
+                    problems.append(
+                        f"{book.product}: {age} 周岁 {k} 加选责任后（计划 {higher}）"
+                        f"保费 {other} 不高于 {value}"
+                    )
+        # 2. 同一年龄、同一计划：交费期越长，每年保费越低
+        terms = sorted(t.choices("pay_term"), key=lambda c: PAY_TERMS[c][1])
+        for (key, age), value in values.items():
+            k = dict(key)
+            i = terms.index(k["pay_term"])
+            for longer in terms[i + 1 :]:
+                other = values.get((tuple(sorted({**k, "pay_term": longer}.items())), age))
+                if other is not None and other >= value:
+                    problems.append(
+                        f"{book.product}: {age} 周岁 {k} 交费期 {longer} "
+                        f"的保费 {other} 不低于 {value}"
+                    )
+                    break
+        return problems[:50]
+
+
+def _yilian_plan(params: dict[str, Any]) -> str:
+    """医联有盟：计划一～八 = 1 + 轻中症×1 + 身故×2 + 无医保×4（第 1 页计划表，提取时逐行核对）。"""
+    opts = params["options"]
+    return str(
+        1 + ("mild_moderate" in opts) + 2 * ("death" in opts) + 4 * (not params["social_security"])
+    )
+
+
+DARWIN_LIFE_WEIGHTS = {
+    "death": 48,
+    "disease_care": 24,
+    "cancer_allowance": 12,
+    "premium_compensation": 6,
+    "pillar_care": 3,
+}
+DARWIN_MULTI_PAY = {None: 0, "plan1": 1, "plan2": 2}
+# 保至70岁计划对照表（第 817 页）：(身故, 保费补偿, 顶梁柱) → 计划
+DARWIN_TO70 = {
+    (False, False, False): "97",
+    (True, False, False): "98",
+    (False, True, False): "99",
+    (False, False, True): "100",
+    (True, True, False): "101",
+    (True, False, True): "102",
+    (False, True, True): "103",
+    (True, True, True): "104",
+}
+DARWIN_TO70_OPTIONS = {"death", "premium_compensation", "pillar_care"}
+
+
+def _darwin_plan(params: dict[str, Any]) -> str:
+    """达尔文12号：终身计划 1～96 按可选责任的混合进制编号（第 1 页计划对照表，提取时逐行核对）。"""
+    opts = set(params["options"])
+    multi = params.get("multi_pay")
+    if params["coverage"] == "life":
+        return str(1 + sum(DARWIN_LIFE_WEIGHTS[o] for o in opts) + DARWIN_MULTI_PAY[multi])
+    names = dict(DARWIN_OPTIONS)
+    labels = [names[o] for o in sorted(opts - DARWIN_TO70_OPTIONS)]
+    if multi:
+        labels.append("重大疾病多次给付保险金")
+    if labels:
+        raise NotOffered(f"保至70岁计划不含：{'、'.join(labels)}")
+    return DARWIN_TO70[("death" in opts, "premium_compensation" in opts, "pillar_care" in opts)]
+
+
+DARWIN_OPTIONS = (
+    ("death", "身故或全残保险金"),
+    ("disease_care", "疾病关爱保险金"),
+    ("cancer_allowance", "「恶性肿瘤——重度」治疗津贴保险金"),
+    ("premium_compensation", "重大疾病保费补偿金"),
+    ("pillar_care", "顶梁柱关爱保险金"),
+)
+DARWIN_EXTRA = (
+    ParamSpec(
+        "coverage",
+        "保障期间",
+        "choice",
+        choices=(("life", "终身"), ("to70", "保至70岁")),
+    ),
+    ParamSpec(
+        "multi_pay",
+        "重大疾病多次给付",
+        "choice",
+        required=False,
+        choices=(("plan1", "方案一"), ("plan2", "方案二")),
+        hint="不选表示不含；仅终身计划可选",
+    ),
+)
+YILIAN_OPTIONS = (
+    ("mild_moderate", "轻度、中度疾病保险金（含对应豁免）"),
+    ("death", "身故或全残保险金"),
+)
+YILIAN_EXTRA = (
+    ParamSpec(
+        "social_security", "是否有医保", "bool", hint="决定所含一般医疗保险金的版本（有/无医保）"
+    ),
+)
+
+
 ZHONGAN_ADDONS = (
     Addon("family_deductible", "家庭共享免赔额加油包", 70),
     Addon("ci_special_care", "重大疾病扩展特需医疗加油包", 70),
@@ -473,6 +850,17 @@ ZHONGAN_ADDONS = (
     Addon("outpatient", "门急诊医疗加油包", 55),
     Addon("hospital_allowance", "住院津贴加油包", 70),
     Addon("drug", "药省保加油包", 70),
+)
+
+# 星相守2号：只提取「有等待期」（首次投保）的列；重大疾病补充关爱（按每千元保额、分性别）
+# 费率表没给保额范围，暂不开放
+XIANGSHOU_ADDONS = (
+    Addon("basic_medical", "基础医疗保险金"),
+    Addon("ci_rehab", "重大疾病康复医疗保险金"),
+    Addon("ci_allowance", "重大疾病住院或重症监护病房住院津贴保险金"),
+    Addon("cancer_drug", "恶性肿瘤-重度特定药品费用医疗保险金"),
+    Addon("ci_special_care", "重大疾病住院拓展特需医疗保险金"),
+    Addon("outpatient", "附加长期门急诊医疗保险"),
 )
 
 # 产品名 → 报价规则。产品名与 app/seed/products.json、费率 JSON 的 product 字段一致。
@@ -487,6 +875,13 @@ RULES: dict[str, ProductRule] = {
     "中英人寿福满佳C款（悦享版）": LifeRule(),
     "太保福有余2025": LifeRule(),
     "新华人寿E增福优享版": LifeRule(newborn_note="出生满 30 日"),
+    "复星联合医联有盟重疾险": CriticalIllnessRule(
+        options=YILIAN_OPTIONS, plan_of=_yilian_plan, extra_params=YILIAN_EXTRA
+    ),
+    "达尔文12号重大疾病保险": CriticalIllnessRule(
+        options=DARWIN_OPTIONS, plan_of=_darwin_plan, extra_params=DARWIN_EXTRA
+    ),
+    "复星联合星相守2号长期医疗险（个人版）": MedicalRule(max_new_age=None, addons=XIANGSHOU_ADDONS),
 }
 
 

@@ -57,7 +57,11 @@ function ParamField({ spec }: { spec: QuoteParamSpec }) {
     case 'choice':
       return (
         <Form.Item {...common}>
-          <Radio.Group options={spec.choices} optionType="button" />
+          {/* 非必填的单选加一个「不选」：单选按钮选中后无法取消，提交时空值会被去掉 */}
+          <Radio.Group
+            options={spec.required ? spec.choices : [{ value: '', label: '不选' }, ...spec.choices]}
+            optionType="button"
+          />
         </Form.Item>
       )
     case 'multi':

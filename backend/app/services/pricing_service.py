@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -79,8 +80,45 @@ async def load_rate_books(session: AsyncSession, rates_dir: Path = RATES_DIR) ->
     return report
 
 
-def book_of(record: RateBookRecord) -> RateBook:
-    return book_from_json(record.content, version=record.version)
+@dataclass(frozen=True)
+class RateBookRef:
+    """报价记录引用的费率版本（不带内容，内容可能有几 MB）。"""
+
+    id: int
+    version: str
+
+
+# 解析好的费率表，按 (rate_books.id, version) 缓存。行写入后内容不再修改（新版本是新行）；
+# 带上 version 是防止库被重建、id 被复用时取到旧内容。
+# 达尔文12号一份 6 MB、5 万格，不缓存时每次报价都要从库里取出并解析约 0.5 秒。
+_BOOK_CACHE: OrderedDict[tuple[int, str], RateBook] = OrderedDict()
+_BOOK_CACHE_SIZE = 32
+
+
+def _parse_book(content: dict[str, Any], version: str) -> RateBook:
+    book = book_from_json(content, version=version)
+    for table in book.tables.values():
+        table.warm()  # 索引是懒加载的，在线程里提前建好，第一次报价不在事件循环里扫 5 万格
+    return book
+
+
+async def _load_book(session: AsyncSession, ref: RateBookRef) -> RateBook:
+    cache_key = (ref.id, ref.version)
+    book = _BOOK_CACHE.get(cache_key)
+    if book is not None:
+        _BOOK_CACHE.move_to_end(cache_key)
+        return book
+    content = await session.scalar(
+        select(RateBookRecord.content).where(RateBookRecord.id == ref.id)
+    )
+    if content is None:
+        raise LookupError(f"rate_books#{ref.id} 不存在")
+    # 解析和建索引都是 CPU 密集操作，放线程池，不阻塞事件循环
+    book = await anyio.to_thread.run_sync(_parse_book, content, ref.version)
+    _BOOK_CACHE[cache_key] = book
+    while len(_BOOK_CACHE) > _BOOK_CACHE_SIZE:
+        _BOOK_CACHE.popitem(last=False)
+    return book
 
 
 class PricingService:
@@ -93,18 +131,21 @@ class PricingService:
             return None
         return product
 
-    async def current_book(self, product: Product) -> tuple[RateBookRecord, RateBook] | None:
+    async def current_book(self, product: Product) -> tuple[RateBookRef, RateBook] | None:
         """产品没有报价规则或费率表未入库时返回 None。"""
         if rule_for(product.name) is None:
             return None
-        record = await self.session.scalar(
-            select(RateBookRecord).where(
-                RateBookRecord.product_id == product.id, RateBookRecord.is_current
+        row = (
+            await self.session.execute(
+                select(RateBookRecord.id, RateBookRecord.version).where(
+                    RateBookRecord.product_id == product.id, RateBookRecord.is_current
+                )
             )
-        )
-        if record is None:
+        ).first()
+        if row is None:
             return None
-        return record, book_of(record)
+        ref = RateBookRef(id=row.id, version=row.version)
+        return ref, await _load_book(self.session, ref)
 
     async def param_specs(self, product_id: int) -> tuple[Product, list[ParamSpec] | None] | None:
         """返回 (产品, 参数说明)；产品不存在返回 None，暂不支持报价时参数说明为 None。"""
@@ -120,7 +161,7 @@ class PricingService:
 
     async def quote(
         self, product_id: int, params: Mapping[str, Any]
-    ) -> tuple[Product, RateBookRecord, QuoteResult] | tuple[Product, None, None] | None:
+    ) -> tuple[Product, RateBookRef, QuoteResult] | tuple[Product, None, None] | None:
         product = await self._active_product(product_id)
         if product is None:
             return None
@@ -133,7 +174,7 @@ class PricingService:
         return product, record, rule.quote(book, params)
 
     async def save(
-        self, user: User, product: Product, record: RateBookRecord, result: QuoteResult
+        self, user: User, product: Product, record: RateBookRef, result: QuoteResult
     ) -> Quote:
         assert result.status == "ok" and result.annual_premium is not None
         assert result.total_premium is not None and result.pay_years is not None

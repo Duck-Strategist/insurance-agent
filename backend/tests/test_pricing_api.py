@@ -17,18 +17,31 @@ from tests.test_auth import bearer, register
 
 XH = "新华人寿E增福优享版"
 ZA = "众安尊享e生百万医疗险2026版"
+DW = "达尔文12号重大疾病保险"
 NO_RATES = "达尔文宝贝计划12号"  # 没有费率表
 
 LIFE_PARAMS = {"age": 30, "gender": "male", "pay_term": "3y", "annual_premium": "10000"}
 
 
+# 接口测试只加载用到的几份费率表；达尔文12号一份 6 MB，每个测试都加载会让测试慢 2 秒
+API_RATE_FILES = ("e-zengfu.json", "zunxiang-e-sheng-2026.json")
+
+
+@pytest.fixture(scope="module")
+def api_rates_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    path = tmp_path_factory.mktemp("rates")
+    for name in API_RATE_FILES:
+        shutil.copy(RATES_DIR / name, path / name)
+    return path
+
+
 @pytest.fixture
-async def products(db_session: AsyncSession) -> dict[str, int]:
+async def products(db_session: AsyncSession, api_rates_dir: Path) -> dict[str, int]:
     """事务内清空产品（级联清掉费率表和报价），写入种子产品并加载费率表。"""
     await db_session.execute(delete(Product))
     await seed_products(db_session)
-    report = await load_rate_books(db_session)
-    assert len(report.inserted) == len(list(RATES_DIR.glob("*.json")))
+    report = await load_rate_books(db_session, api_rates_dir)
+    assert len(report.inserted) == len(API_RATE_FILES)
     assert report.unknown_products == []
     rows = await db_session.execute(select(Product.name, Product.id))
     return {name: pid for name, pid in rows.all()}
@@ -43,12 +56,39 @@ async def _token(client: AsyncClient, username: str = "alice") -> str:
 # ---------- 入库 ----------
 
 
-async def test_load_is_idempotent(db_session: AsyncSession, products: dict[str, int]) -> None:
-    report = await load_rate_books(db_session)
-    assert report.inserted == []
-    assert len(report.unchanged) == len(list(RATES_DIR.glob("*.json")))
+async def test_load_all_is_idempotent(db_session: AsyncSession) -> None:
+    """全部费率文件都能对上种子产品；第二次加载内容没变，不产生新版本。"""
+    await db_session.execute(delete(Product))
+    await seed_products(db_session)
+    first = await load_rate_books(db_session)
+    total = len(list(RATES_DIR.glob("*.json")))
+    assert len(first.inserted) == total and first.unknown_products == []
+    second = await load_rate_books(db_session)
+    assert second.inserted == [] and len(second.unchanged) == total
     count = len((await db_session.scalars(select(RateBookRecord))).all())
-    assert count == len(report.unchanged)
+    assert count == total
+
+
+async def test_long_table_quote_through_api(
+    client: AsyncClient, db_session: AsyncSession, products: dict[str, int], tmp_path: Path
+) -> None:
+    """达尔文12号：按每千元保额计费，第一次报价从库里取出并解析 6 MB 的费率表，之后走缓存。"""
+    shutil.copy(RATES_DIR / "darwin-12.json", tmp_path / "darwin-12.json")
+    assert (await load_rate_books(db_session, tmp_path)).inserted == [DW]
+    params = {
+        "age": 30,
+        "gender": "male",
+        "pay_term": "20y",
+        "sum_assured": "300000",
+        "coverage": "life",
+    }
+    for _ in range(2):
+        resp = await client.post(f"/api/v1/products/{products[DW]}/quote", json={"params": params})
+        body = resp.json()
+        assert body["status"] == "ok", body
+        assert body["annual_premium"] == "5472.00"  # 每千元 18.24
+        assert body["total_premium"] == "109440.00"  # × 20 年
+        assert body["sum_assured"] == "300000.00"
 
 
 async def test_new_version_keeps_old_one_for_reproducibility(
