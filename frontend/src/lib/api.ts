@@ -10,8 +10,12 @@ import type {
   EvalRun,
   Page,
   ParentPage,
+  PricingInfo,
   Product,
   ProductCategory,
+  QuoteParams,
+  QuoteResult,
+  SavedQuote,
   SearchMode,
   SearchResponse,
   TokenResponse,
@@ -114,6 +118,24 @@ export const productApi = {
     return request<Page<Product>>(`/api/v1/products?${params}`)
   },
   get: (id: number) => request<Product>(`/api/v1/products/${id}`),
+}
+
+// ---- 报价 ----
+export const pricingApi = {
+  info: (productId: number) => request<PricingInfo>(`/api/v1/products/${productId}/pricing`),
+  /** 试算（公开，不保存）：缺参、不可投保也是 200，看 status */
+  calculate: (productId: number, params: QuoteParams) =>
+    request<QuoteResult>(`/api/v1/products/${productId}/quote`, {
+      method: 'POST',
+      body: json({ params }),
+    }),
+  /** 保存（需登录）：服务端重新计算，不信任前端金额 */
+  save: (productId: number, params: QuoteParams) =>
+    request<SavedQuote>('/api/v1/quotes', {
+      method: 'POST',
+      body: json({ product_id: productId, params }),
+    }),
+  list: () => request<SavedQuote[]>('/api/v1/quotes'),
 }
 
 // ---- 管理后台 ----

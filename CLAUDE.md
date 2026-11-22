@@ -2,7 +2,7 @@
 
 安心保 · 智能保险顾问：RAG + LangGraph 的保险顾问 Agent（学习 + 面试作品项目）。
 
-- 设计与决策：[docs/SPEC.md](docs/SPEC.md)（决策 D1–D40、里程碑 M0–M9、风险 Q1–Q17）。做设计取舍前先查，取舍定了就补一条决策。
+- 设计与决策：[docs/SPEC.md](docs/SPEC.md)（决策 D1–D43、里程碑 M0–M9、风险 Q1–Q18）。做设计取舍前先查，取舍定了就补一条决策。
 - 面试故事集：[docs/INTERVIEW.md](docs/INTERVIEW.md)。每个里程碑结束后补充（见「工作流程」）。
 - 参考实现 `../hm-insurance/` 是教学项目，只读对照，不复制代码，它的 `.env` 里有泄露过的密钥，不要使用。
 
@@ -15,6 +15,7 @@
 | `backend/app/services/` | 业务逻辑；路由不直接写 SQL |
 | `backend/app/models/` | ORM 模型；新模型必须在 `models/__init__.py` 导入，否则 Alembic 看不到 |
 | `backend/app/rag/` | 入库流水线：parser → structure → chunker → embedder → pipeline；检索：retriever（+ reranker） |
+| `backend/app/pricing/` | 报价引擎：`extract`（PDF → JSON，开发依赖 pdfplumber）、`tables`（数据结构与结构校验）、`engine`（报价规则，纯函数）；费率数据 `rates/*.json` 入库 |
 | `backend/app/eval/` | 离线评测：生成评测题、跑检索三组对照、写 `eval_runs` |
 | `backend/migrations/` | Alembic 迁移 |
 | `frontend/src/` | React 19 + antd 6 + React Router + TanStack Query + Zustand |
@@ -34,6 +35,7 @@ uv run alembic upgrade head            # 迁移；改模型后：uv run alembic 
 uv run uvicorn app.main:app --reload
 uv run python -m app.seed              # 补齐演示产品（--overwrite 覆盖）
 uv run python -m app.rag ingest --all  # 条款入库（--force 用缓存重跑）
+uv run python -m app.pricing extract    # 费率表 PDF → app/pricing/rates/*.json（校验不过不写）；check 只校验，load 写库（容器启动时自动执行）
 uv run python -m app.manage promote-admin <用户名>
 uv run python -m app.eval retrieval    # 检索三组对照（真实调用 DashScope，约 10 分钟）；参数用环境变量覆盖，如 RAG__RETRIEVAL__FULLTEXT_WEIGHT=0.5
 uv run python -m app.eval generate     # 用 LLM 生成检索题草稿（需人工审核后另存为正式评测集）
@@ -88,6 +90,14 @@ npm run lint ; npx tsc -b ; npm run test ; npm run build
 - **提示词里的示例不能取自评测集**（包括看过的失败案例）：曾把难题集错题的口语→术语映射写进改写提示词，难题集 R@5 虚高到 0.971，去掉后只有 0.912，比不改写还差（spec Q16）。
 - 测试用 `tests/test_agent.py` 的 `make_runtime`（脚本化假 LLM + 假检索器 + InMemorySaver）。
 - checkpointer 的表由 `AsyncPostgresSaver.setup()` 管理，`migrations/env.py` 的 `include_name` 把它们排除在 Alembic 之外。
+
+## 报价约定
+
+- 报价数字只由 `app/pricing/engine.py` 按费率表计算，LLM 不生成、不改写数字（D11）。参数缺失返回 `missing_params`、不可投保返回 `ineligible` 和原因，不抛异常。
+- 费率 JSON 只放单元格；怎么算、首投年龄上限等写在规则类里（D42）。不要因为表里有某一行就认为能投保（众安 71 岁以上的行只适用于续保）。
+- 提取按单元格位置，不按空格切文本；新增提取函数必须先核对表头文字（`_expect`），并让规则的 `check` 有能发现列错位的业务校验（D43）。
+- 重新提取后审查 JSON 的 diff；`tests/test_pricing_samples.py` 的期望值要对照 PDF 页面图像人工读出，**不能从提取结果里抄**。新增产品时至少补：每张表的首尾行、每个维度、空白格（应不可投保）。
+- 金额参数只接受字符串或整数（拒绝 float）；保额四舍五入到分。保存报价时服务端重新计算，不信任前端传来的金额。
 
 ## 前端约定
 

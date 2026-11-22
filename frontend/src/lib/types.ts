@@ -183,3 +183,65 @@ export type ChatEvent =
   | { type: 'citations'; items: Citation[] }
   | { type: 'done' }
   | { type: 'error'; message: string }
+
+// ---- 报价（M5）----
+export type ParamKind = 'age' | 'choice' | 'bool' | 'money' | 'multi'
+
+export interface QuoteParamSpec {
+  name: string
+  label: string
+  kind: ParamKind
+  required: boolean
+  choices: { value: string; label: string }[]
+  min: number | null
+  max: number | null
+  hint: string
+}
+
+export interface PricingInfo {
+  product_id: number
+  /** false：暂不支持在线报价 */
+  supported: boolean
+  params: QuoteParamSpec[]
+}
+
+export type QuoteParams = Record<string, string | number | boolean | string[]>
+
+export interface QuoteLine {
+  code: string
+  title: string
+  premium: string
+  /** 计算依据，如「费率表第 1 页：26–30 周岁 有社保 318.00 元」 */
+  basis: string
+  page: number
+}
+
+export interface QuoteResult {
+  product_id: number
+  product_name: string
+  status: 'ok' | 'missing_params' | 'invalid' | 'ineligible'
+  rate_version: string
+  params: QuoteParams
+  missing: string[]
+  messages: string[]
+  lines: QuoteLine[]
+  annual_premium: string | null
+  pay_years: number | null
+  total_premium: string | null
+  /** 终身寿险：由保费算出的基本保额 */
+  sum_assured: string | null
+}
+
+export interface SavedQuote {
+  id: number
+  product_id: number
+  product_name: string
+  rate_version: string
+  params: QuoteParams
+  lines: QuoteLine[]
+  annual_premium: string
+  pay_years: number
+  total_premium: string
+  sum_assured: string | null
+  created_at: string
+}

@@ -1,0 +1,17 @@
+{
+  "product": "太平洋小蜜蜂6号玫瑰版综合意外险",
+  "source": {"file": "太平洋小蜜蜂6号玫瑰版综合意外险费率表.pdf", "sha256": "c8735874d529e8bee083dbb07304e3042ca6f16c26f71ccad55b7f96a427df53"},
+  "tables": [
+    {
+      "code": "base",
+      "title": "综合意外险（玫瑰版）",
+      "unit": "premium",
+      "dims": ["plan"],
+      "items": [
+        {"age": [18, 50], "key": {"plan": "典藏版"}, "value": "169.00", "page": 1},
+        {"age": [18, 50], "key": {"plan": "尊享版"}, "value": "319.00", "page": 1},
+        {"age": [18, 50], "key": {"plan": "至尊版"}, "value": "439.00", "page": 1}
+      ]
+    }
+  ]
+}

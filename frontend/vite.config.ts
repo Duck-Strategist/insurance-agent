@@ -19,5 +19,7 @@ export default defineConfig({
     globals: true,
     setupFiles: ['./src/test/setup.ts'],
     css: false,
+    // antd 表单 + 路由的交互测试在本机全量并行时单个要 5–8 秒，默认 5 秒会偶发超时
+    testTimeout: 15_000,
   },
 })

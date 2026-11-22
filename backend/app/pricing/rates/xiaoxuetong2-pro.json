@@ -1,0 +1,17 @@
+{
+  "product": "人保小学童2号Pro学平险",
+  "source": {"file": "人保小学童2号Pro学平险费率表.pdf", "sha256": "5bdf6c7c2f1afaf5c750e9e8f2b14ea2ba001e9e24006be81dd382d8763e024d"},
+  "tables": [
+    {
+      "code": "base",
+      "title": "学平险（保障期限 1 年）",
+      "unit": "premium",
+      "dims": ["plan"],
+      "items": [
+        {"age": [3, 24], "key": {"plan": "基础版"}, "value": "180.00", "page": 1},
+        {"age": [3, 24], "key": {"plan": "经典版"}, "value": "240.00", "page": 1},
+        {"age": [3, 24], "key": {"plan": "尊贵版"}, "value": "335.00", "page": 1}
+      ]
+    }
+  ]
+}

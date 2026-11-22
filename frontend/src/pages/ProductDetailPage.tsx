@@ -4,6 +4,7 @@ import { Alert, Button, Card, Descriptions, Flex, Result, Skeleton, Tag, Typogra
 import { Link, useParams } from 'react-router'
 
 import { CategoryTag } from '../components/CategoryTag'
+import { QuoteCalculator } from '../components/QuoteCalculator'
 import { ApiError, productApi } from '../lib/api'
 import { formatPremium } from '../lib/format'
 
@@ -58,10 +59,12 @@ export function ProductDetailPage() {
             </Descriptions.Item>
           </Descriptions>
           <Typography.Text type="secondary">
-            保费为参考区间，实际金额以年龄、保额等因素计算为准。精确报价与条款问答将在 AI
-            顾问中提供。
+            参考保费为区间，实际金额以下方按费率表计算的结果为准。
           </Typography.Text>
         </Flex>
+      </Card>
+      <Card title="在线报价">
+        <QuoteCalculator productId={productId} />
       </Card>
     </Flex>
   )

@@ -50,6 +50,9 @@
 | D39 | 查询改写只补全指代（「那它」「那生孩子呢」），不换术语；第一句不改写；改写后的查询与原问题一起召回、用改写后的查询重排 | M4 评测：换术语的改写在两个集上都比不改写差（难题集 MRR 0.818→0.785，生成集 0.980→0.962，eval_runs #21/#22 vs #46/#47）；早先看起来的提升来自提示词示例泄漏了难题集（Q16） |
 | D40 | 跑检索评测前，除了校验标准章节路径存在，还要校验生成题的原文依据（evidence）仍在标准章节里 | 结构规则改动后，路径可能还在、但原文已挪到别的章节：Q13 修复后 gen-100/115 的路径仍有效，答案却已在新识别出的病种章节里，只校验路径会让指标悄悄失真 |
 | D35 | 评测集生成用 DashScope `qwen-plus`（与向量化共用 Key），LLM 同时给出原文依据，脚本校验依据逐字出现在该章节，否则丢弃 | 本项目还没有 DeepSeek Key；依据校验能挡住编造的题 |
+| D41 | 费率数据存为「每产品一份 JSON」：提取后提交进仓库（`app/pricing/rates/`）审查 diff，入库时整份存进 `rate_books.content`（JSONB），版本 = JSON 文本哈希；新版本成为当前版本，旧版本保留，报价记录引用具体版本。修订 §4 的 `rate_plans`/`rate_items` | 引擎每次都整产品读取，从不按单元格查 SQL；整份存储让「报价可复现」变成引用一行记录，费率表更新后旧报价仍能按当时的数据重算；JSON 进仓库，改动在 PR 里逐格可审 |
+| D42 | 数据与规则分开：JSON 只放单元格（年龄区间 × 维度 → 数值 + 页码），怎么算（哪几张表相加、按保费反算保额、首投年龄上限）写在代码里的规则类（固定计划 / 医疗年龄段 + 加油包 / 终身寿保额表）。可投保年龄以规则为准，不以表里有没有这一行为准 | 众安费率表列到 105 岁、门急诊列到 65 岁，但注释写明 71 岁以上（门急诊 56 岁以上）只适用于续保；只看表会把续保价报给首次投保的人 |
+| D43 | 费率表提取按表格线取单元格（pdfplumber），不按空格切文本；每个提取函数先逐列核对表头文字再按固定列映射取值；提取后跑结构校验（年龄区间无重叠无缺口、正数）和业务校验（交费期越长每千元保费对应保额越高、同列随年龄不增、无社保不低于有社保、计划档次递增），任何一项不过就不写文件 | 高龄行的空白格不在行尾：福有余 59 岁有 9 年交没有 10 年交、新华 61 岁起只有趸交且男女各一列，按文本切分会让数字整体左移到别的列；列映射写错时结构上看不出来，只有业务规律能发现（有测试：对调两列后校验必须报错） |
 
 ---
 
@@ -132,10 +135,10 @@ insurance-agent/
 | `products` | id, name, insurer, category, description, target_group, highlights, min_premium, status | 4 类：medical / critical_illness / accident / life |
 | `documents` | id, product_id, kind(`clause`/`rate_table`), file_path, file_hash, status, parser_version | 入库状态可在后台查看 |
 | `chunks` | id, document_id, product_id, parent_id, level(`parent`/`child`), section_path[], content, embedding vector(1024), tsv tsvector | 父子块同表，父块不存向量 |
-| `rate_plans` / `rate_items` | 沿用原项目思路：plan_code, rate_type, 维度（年龄段、性别、社保、缴费期、保额…）, premium / rate_value, source_page | 报价引擎的数据源 |
+| `rate_books` | product_id, version, source_file, source_sha256, content(jsonb：全部费率表), is_current | 报价引擎的数据源（M5 起替代原计划的 `rate_plans`/`rate_items`，见 D41） |
 | `chat_threads` | id(=LangGraph thread_id), user_id, title, updated_at | 消息正文由 checkpointer 保存 |
 | `plans` | id, user_id, thread_id, status(`draft`/`confirmed`), items(jsonb), quote_snapshot(jsonb) | 方案确认结果 |
-| `quotes` | id, user_id, product_id, params(jsonb), breakdown(jsonb), total_premium, rate_plan_version | 报价可复现 |
+| `quotes` | id, user_id, product_id, rate_book_id, params(jsonb), breakdown(jsonb), annual_premium, pay_years, total_premium, sum_assured | 报价可复现（引用具体费率版本） |
 | `eval_runs` | id, suite, config(jsonb), metrics(jsonb), created_at | 后台展示评测结果 |
 
 画像 JSON 结构：
@@ -230,6 +233,13 @@ START → load_context（取画像、上轮工作流）
 - 入参缺失时返回 `missing_params`，由 Agent 去追问。
 - 单测覆盖：每个产品至少抽 N 个点，与费率表原值逐一比对，要求完全一致。
 
+M5 实现（`app/pricing/`）：
+- 流程：`python -m app.pricing extract`（PDF → JSON，校验不过不写）→ 人工审查 diff + 对照 PDF 页面图像补抽查点 → 提交 → 容器启动时 `python -m app.pricing load`（内容没变则跳过）。
+- 规则：`FixedPlanRule`（意外险：年龄段 × 计划）、`MedicalRule`（百万医疗：年龄段 × 社保 + 可选加油包，首投年龄上限在规则里）、`LifeRule`（增额终身寿：按「每 1000 元年交保费对应的基本保额」由保费反算保额，四舍五入到分）。
+- 结果状态：`ok` / `missing_params`（缺哪些参数）/ `invalid`（格式错误）/ `ineligible`（不可投保及原因，如「65 周岁不能选5年交，可选：趸交」）。每行明细带计算依据和费率表页码。
+- 第一批 7 个产品（3 种格式）：小蜜蜂6号、小蜜蜂6号玫瑰版、小学童2号Pro、众安尊享e生2026、中英福满佳C、太保福有余2025、新华E增福，共 1,776 个单元格。其余见 Q18。
+- 只报首次投保、个人单、年交、标准体的价格；家庭单折扣、续保、月交/半年交、加费（EM）暂不支持。年龄按整岁计算，「0 周岁须出生满 30 天」这类出生天数要求只在参数提示里说明，不做校验。
+
 ---
 
 ## 7. 接口契约（初稿）
@@ -242,6 +252,9 @@ START → load_context（取画像、上轮工作流）
 | GET | `/api/v1/threads/{id}/messages` | 历史消息（从 checkpointer 读） |
 | POST | `/api/v1/chat` | SSE 流式对话（M4）：`{thread_id?, message}`，不带 thread_id 时新建会话；同一会话正在回答时 409 |
 | POST | `/api/v1/chat/resume` | 方案确认后恢复图执行（interrupt resume） |
+| GET | `/api/v1/products/{id}/pricing` | 报价所需参数及可选值（公开，M5）；不支持报价时 `supported=false` |
+| POST | `/api/v1/products/{id}/quote` | 试算（公开，不保存）：`{params}`；缺参、不可投保也返回 200，看 `status` |
+| POST/GET | `/api/v1/quotes` | 保存报价（服务端重新计算，不信任前端金额；算不出 422）/ 我的报价记录 |
 | GET/PUT | `/api/v1/profile` | 我的画像 |
 | GET | `/api/v1/plans` | 我的方案 |
 | POST/GET | `/api/v1/admin/documents` | 上传条款、查看入库状态 |
@@ -260,7 +273,7 @@ START → load_context（取画像、上轮工作流）
 | 检索 | 自建条款问答集（`data/eval/`，M3 已建：生成集 166 题、难题集 34 题）（目标 ≥150 条，覆盖 10 个产品，带标准章节）：LLM 按父块生成问题 + 人工审核，另手写 ≥30 条口语化/跨章节难题单独统计 | Recall@k、MRR、P95 延迟 | 三组配置对照（§5.3） |
 | 端到端 | 同上 + 参考答案 | 正确性、引用忠实度、拒答正确率 | LLM-as-judge + 人工抽检 20%，报告两者一致率 |
 | 路由 | 标注意图集（目标 ≥200 条，含多轮追问） | 准确率、混淆矩阵 | pytest 参数化 |
-| 报价 | 费率表抽样点 | 精确一致率（目标 100%） | 单测 |
+| 报价 | 费率表抽样点（M5 第一批：7 个产品 60 个点，期望值人工对照 PDF 页面图像读出，不来自提取脚本；含 10 个空白格应不可投保） | 精确一致率（目标 100%；M5 第一批 60/60） | 单测 `tests/test_pricing_samples.py` |
 
 - 评测脚本放在 `eval/`，每次运行写入 `eval_runs`，管理后台可查看。
 - 所有简历数字必须来自 `eval_runs` 的真实记录。
@@ -301,7 +314,7 @@ START → load_context（取画像、上轮工作流）
 
 | # | 问题 | 状态 |
 |---|---|---|
-| Q1 | 费率表格式差异大（固定保费 / 年龄段 / 按保额千分比 / 矩阵），解析和校验的工作量可能被低估 | 风险：M5 可先做 3–4 个产品，再扩展 |
+| Q1 | 费率表格式差异大（固定保费 / 年龄段 / 按保额千分比 / 矩阵），解析和校验的工作量可能被低估 | M5 实测：10 份费率表是 5 种格式。第一批做了 3 种格式 7 个产品（D41–D43），剩余见 Q18 |
 | Q2 | LLM 可观测性选型 | 已定 → D17 |
 | Q3 | 理赔咨询是否结合已有保障 | 已定 → D18 |
 | Q4 | 评测集构建方式 | 已定 → D19 |
@@ -317,4 +330,5 @@ START → load_context（取画像、上轮工作流）
 | Q14 | 口语化提问与条款术语之间的词汇鸿沟：「自己先掏多少钱」↔免赔额、「之前就有的病」↔既往症、「刚买完就查出」↔等待期。gte-rerank-v2 下难题集 7 题未进前 5；换 qwen3-rerank 后剩 3 题（心梗↔猝死/疾病免责、既往症、等待期） | M4 试过换术语的查询改写：去掉泄漏后反而更差（D39），未采用。仍存在：如「那生孩子住院能报吗」答案在责任免除里，检索不到时只能回答「视情况而定」。后续可试：对「赔不赔」类问题额外检索责任免除章节 |
 | Q15 | 重排让 P50 延迟增加约 1.0–1.7 秒（gte-rerank-v2 与 qwen3-rerank 相近，30 个候选），向量化 P50 约 490 ms，两路召回的 SQL P50 约 70–90 ms | M4 实测首个 token 5–9 秒（路由约 1–2 秒、检索 + 重排约 2–3 秒、回答模型首 token 约 2–3 秒；有上文时再加改写约 1–2 秒）。可选：路由与检索并行、减少重排候选数 |
 | Q16 | 评测集泄漏：改写提示词的示例取自难题集的错题，难题集 R@5 虚高到 0.971（#45），去掉后 0.912（#49） | 已处理：示例不再取自评测集（CLAUDE.md 约定）。教训：评测集只用于评估，看过的失败案例不能回流到提示词或规则里；需要调参时另留开发集 |
+| Q18 | M5 第一批未覆盖：① 达尔文12号（887 页长表：96 种可选责任组合 × 性别 × 交费期 × 年龄，每千元保额费率 + EM 加费列，另有附加险）；② 医联有盟（180 页长表，8 个计划，保额固定 10 万）；③ 星相守2号个人版/转保版（基准费率 × 家庭单因子 × 无理赔折扣 × 免赔额因子，另有可选责任）；④ 达尔文宝贝12号没有费率表；⑤ 众安「重疾关爱加油包」按每 5 万保额计价但费率表没给保额范围，暂不开放；⑥ 种子数据里的参考保费区间来自原项目，与费率表不完全一致（如众安写 ¥255–1,420，费率表首投最低 142、最高 11,926；小学童已改为 180，已有的库要执行 `python -m app.seed --overwrite` 才会更新，容器启动时的 seed 不覆盖已有产品） | 待办：①② 是一行一条记录的长表，用 pypdfium2 取文本（pdfplumber 处理 887 页超过 10 分钟，pypdfium2 约 35 秒）；③ 需要新规则类型；⑥ 参考保费可改为从费率表推出 |
 | Q17 | 删除用户时 `chat_threads` 级联删除，但 LangGraph checkpoint 表里的消息不会跟着删（不在同一套外键里） | 目前没有删除用户的功能；做账号注销时要先逐个会话调用 `checkpointer.adelete_thread` 再删用户 |
