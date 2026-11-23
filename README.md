@@ -8,13 +8,7 @@
 
 ## 演示视频
 
-[![演示视频：条款问答、顾问配方案、画像、理赔、报价、检索调试、评测记录（2 分 26 秒）](docs/media/demo-poster.jpg)](docs/media/anxinbao-demo.mp4?raw=true)
-
-点击封面下载视频（MP4，8.5 MB）。2 分 26 秒，8 段：条款问答 → 顾问配方案 → 画像与方案确认 → 理赔咨询 → 按费率表报价 → 检索调试 → 评测记录。
-在本机 compose 环境里真实调用模型录制，回答没有挑选；等首个 token 的片段加速 5 倍，流式输出是原速。
-录制方法与脚本见 [docs/DEMO.md](docs/DEMO.md)。
-
-![条款问答：回答带编号引用，展开即是条款原文](docs/images/chat-clause.jpg)
+https://github.com/user-attachments/assets/c99a3986-dfc8-484e-9b35-4837577ae5d2
 
 ## 功能
 
