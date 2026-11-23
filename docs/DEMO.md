@@ -41,6 +41,8 @@
 不需要录屏软件，也不需要 ffmpeg：用本机的 Edge（无界面）按上面的分镜自动操作，通过 Chrome DevTools 协议抓帧，
 再在 Edge 里把帧画到画布上、加字幕条，用浏览器自带的 MediaRecorder 编码成 H.264 MP4。
 2026-11-22 录的一版在 [media/anxinbao-demo.mp4](media/anxinbao-demo.mp4)：1280×840（上方 720 是界面，下方 120 是字幕条），2 分 26 秒，约 8.5 MB。
+README 里播放的是同一份视频在 GitHub 网页上传的附件（提交进仓库的视频 GitHub 不会播放，只能下载）：重录后在网页上编辑 README，
+把新视频拖进编辑框，用生成的 `github.com/user-attachments/...` 链接替换旧链接，再覆盖 `docs/media/` 里的备份。
 README 的截图（`docs/images/`）由同一套脚本的 `screenshots.py` 拍：1280×800 视口、2 倍像素密度（2560×1600），JPEG 质量 92、不做色度抽样。
 
 ```powershell
