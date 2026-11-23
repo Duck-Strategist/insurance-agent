@@ -1,0 +1,110 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>encode</title>
+<canvas id="c" width="1280" height="840"></canvas>
+<script>
+const FONT = '"Microsoft YaHei", "PingFang SC", sans-serif';
+// 录屏放在上方 1280×720，下方 120 像素是字幕条，不遮挡界面（输入框里打字也看得到）
+const VW = 1280, VH = 720, CH = 840;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// 第一行宽度可以和后面不同（第一行左边放场景标签）
+function wrap(ctx, text, firstWidth, width) {
+  const lines = [];
+  let line = '';
+  for (const ch of text) {
+    const max = lines.length ? width : firstWidth;
+    if (ctx.measureText(line + ch).width > max) { lines.push(line); line = ch; } else line += ch;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+function drawCard(ctx, card) {
+  const g = ctx.createLinearGradient(0, 0, VW, CH);
+  g.addColorStop(0, '#0b1f3a'); g.addColorStop(1, '#16437e');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, VW, CH);
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
+  ctx.font = `bold 52px ${FONT}`; ctx.fillText(card.title, 640, 320);
+  ctx.font = `26px ${FONT}`; ctx.fillStyle = '#cfe0ff';
+  card.lines.forEach((l, i) => ctx.fillText(l, 640, 400 + i * 46));
+  ctx.textAlign = 'left';
+}
+
+function drawCaption(ctx, scene) {
+  ctx.fillStyle = '#0f172a';
+  ctx.fillRect(0, VH, VW, CH - VH);
+  if (!scene) return;
+  const x0 = 28, top = VH + 22, lineH = 36;
+  ctx.font = `bold 20px ${FONT}`;
+  const tw = ctx.measureText(scene.title).width;
+  ctx.fillStyle = '#1677ff';
+  ctx.beginPath(); ctx.roundRect(x0, top - 2, tw + 26, 32, 16); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.fillText(scene.title, x0 + 13, top + 21);
+  ctx.font = `23px ${FONT}`;
+  const textX = x0 + tw + 26 + 16;
+  const lines = wrap(ctx, scene.caption, VW - textX - 28, VW - x0 * 2);
+  ctx.fillStyle = '#e5edff';
+  lines.slice(0, 3).forEach((l, i) => ctx.fillText(l, i === 0 ? textX : x0, top + 22 + i * lineH));
+}
+
+async function loadFrame(name) {
+  const r = await fetch('frames/' + name);
+  return createImageBitmap(await r.blob());
+}
+
+(async () => {
+  const m = await (await fetch('manifest.json')).json();
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const stream = canvas.captureStream(30);
+  const type = ['video/mp4;codecs=avc1.640028', 'video/mp4', 'video/webm;codecs=vp9'].find(t => MediaRecorder.isTypeSupported(t));
+  const rec = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 6_000_000 });
+  const chunks = [];
+  rec.ondataavailable = e => e.data.size && chunks.push(e.data);
+  const stopped = new Promise(r => (rec.onstop = r));
+
+  const entries = m.entries; // {at, frame?, card?}
+  const cache = new Map();
+  const prefetch = from => {
+    for (let k = from; k < Math.min(entries.length, from + 45); k++) {
+      const f = entries[k].frame;
+      if (f && !cache.has(f)) cache.set(f, loadFrame(f));
+    }
+  };
+  const sceneAt = t => { let s = null; for (const x of m.scenes) if (x.at <= t) s = x; return s; };
+
+  prefetch(0);
+  await Promise.all([...cache.values()]);
+  rec.start(1000);
+  const start = performance.now();
+  let i = 0, drawnI = -1, drawnScene = null, lastPaint = 0;
+  while (true) {
+    const now = performance.now() - start;
+    if (now >= m.total) break;
+    while (i + 1 < entries.length && entries[i + 1].at <= now) {
+      const old = entries[i].frame;
+      i++;
+      if (old && old !== entries[i].frame) {
+        const p = cache.get(old); cache.delete(old); p && p.then(b => b.close());
+      }
+    }
+    prefetch(i);
+    const scene = sceneAt(now);
+    if (i !== drawnI || scene !== drawnScene || now - lastPaint > 200) {
+      const e = entries[i];
+      if (e.card !== undefined) drawCard(ctx, m.cards[e.card]);
+      else { ctx.drawImage(await cache.get(e.frame), 0, 0, VW, VH); drawCaption(ctx, scene); }
+      drawnI = i; drawnScene = scene; lastPaint = now;
+    }
+    await sleep(8);
+  }
+  rec.stop();
+  await stopped;
+  const blob = new Blob(chunks, { type });
+  await fetch('/upload?type=' + encodeURIComponent(type), { method: 'POST', body: blob });
+  document.title = 'done';
+})().catch(async e => {
+  await fetch('/upload?error=' + encodeURIComponent(String(e && e.stack || e)), { method: 'POST', body: '' });
+});
+</script>

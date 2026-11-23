@@ -35,3 +35,28 @@
 
 - 画像建议卡片只在本轮流式输出时出现，刷新页面后就没了（建议不落库是有意的）；需要保存的话在离开前点。
 - 理赔咨询最慢（首 token 12–15 秒），录制时留足等待时间。
+
+## 用脚本录制（`scripts/demo_video/`）
+
+不需要录屏软件，也不需要 ffmpeg：用本机的 Edge（无界面）按上面的分镜自动操作，通过 Chrome DevTools 协议抓帧，
+再在 Edge 里把帧画到画布上、加字幕条，用浏览器自带的 MediaRecorder 编码成 H.264 MP4。
+2026-11-22 录的一版：1280×840（上方 720 是界面，下方 120 是字幕条），2 分 26 秒，约 8 MB。
+
+```powershell
+cd backend
+# 1. 演示账号（新建，管理员；画面右上角会显示用户名）
+uv run python ../scripts/demo_video/reset_user.py demo <密码> --recreate
+# 2. 按分镜操作并抓帧（约 3 分钟，真实调用模型）
+uv run python ../scripts/demo_video/record.py <输出目录> demo <密码>
+# 3. 编码成视频（实时编码，约 2.5 分钟）
+uv run python ../scripts/demo_video/encode.py <输出目录> <视频文件.mp4>
+# 4. 检查：时长、按时间点截帧
+uv run python ../scripts/demo_video/verify.py <视频文件.mp4> <截帧目录> 10,60,120
+# 5. 删除演示账号（会话通过接口删除，checkpoint 一起清掉）
+uv run python ../scripts/demo_video/reset_user.py demo <密码>
+```
+
+- 等首个 token 的那段（路由、检索、重排）加速 5 倍，流式输出保持原速；画面静止最长保留 5 秒。字幕在 `encode.py` 的 `CAPTIONS`。
+- 录完先看帧再编码：无界面窗口会被当成后台，没有输入时不出新帧，画面会停在加载中。`cdp.py` 加了防节流参数，
+  `record.py` 在页面里放了一个 1 像素的动画让合成器持续出帧，还要等数据真正渲染出来（结果卡片、表格行）再进入下一步。
+- 生成的 MP4 是分片格式，文件头里没有总时长：本地播放器和支持 Range 的服务器都正常；边下边播且不支持 Range 时，浏览器会按已下载部分估时长。
