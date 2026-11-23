@@ -40,7 +40,8 @@
 
 不需要录屏软件，也不需要 ffmpeg：用本机的 Edge（无界面）按上面的分镜自动操作，通过 Chrome DevTools 协议抓帧，
 再在 Edge 里把帧画到画布上、加字幕条，用浏览器自带的 MediaRecorder 编码成 H.264 MP4。
-2026-11-22 录的一版：1280×840（上方 720 是界面，下方 120 是字幕条），2 分 26 秒，约 8 MB。
+2026-11-22 录的一版在 [media/anxinbao-demo.mp4](media/anxinbao-demo.mp4)：1280×840（上方 720 是界面，下方 120 是字幕条），2 分 26 秒，约 8.5 MB。
+README 的截图（`docs/images/`）由同一套脚本的 `screenshots.py` 拍：1280×800 视口、2 倍像素密度（2560×1600），JPEG 质量 92、不做色度抽样。
 
 ```powershell
 cd backend
@@ -52,11 +53,14 @@ uv run python ../scripts/demo_video/record.py <输出目录> demo <密码>
 uv run python ../scripts/demo_video/encode.py <输出目录> <视频文件.mp4>
 # 4. 检查：时长、按时间点截帧
 uv run python ../scripts/demo_video/verify.py <视频文件.mp4> <截帧目录> 10,60,120
-# 5. 删除演示账号（会话通过接口删除，checkpoint 一起清掉）
+# 5. （可选）重拍 README 截图，检查后覆盖 docs/images/
+uv run python ../scripts/demo_video/screenshots.py <截图目录> demo <密码>
+# 6. 删除演示账号（会话通过接口删除，checkpoint 一起清掉）
 uv run python ../scripts/demo_video/reset_user.py demo <密码>
 ```
 
 - 等首个 token 的那段（路由、检索、重排）加速 5 倍，流式输出保持原速；画面静止最长保留 5 秒。字幕在 `encode.py` 的 `CAPTIONS`。
 - 录完先看帧再编码：无界面窗口会被当成后台，没有输入时不出新帧，画面会停在加载中。`cdp.py` 加了防节流参数，
   `record.py` 在页面里放了一个 1 像素的动画让合成器持续出帧，还要等数据真正渲染出来（结果卡片、表格行）再进入下一步。
+- 截图在回答结束后要等几秒再滚动：页面会重新拉取历史消息并自动滚到底部，会覆盖之前的滚动；滚动用瞬时的，平滑滚动途中再调整位置会被打断。
 - 生成的 MP4 是分片格式，文件头里没有总时长：本地播放器和支持 Range 的服务器都正常；边下边播且不支持 Range 时，浏览器会按已下载部分估时长。

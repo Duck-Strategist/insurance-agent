@@ -19,8 +19,6 @@ from cdp import CDP, launch, page_ws_url  # noqa: E402
 
 BASE = "http://localhost:8080"
 W, H = 1280, 720
-OUT = Path(sys.argv[1])
-USER, PASSWORD = sys.argv[2], sys.argv[3]
 
 # 页面里的辅助函数：按文字找元素、点击时画一个红色波纹（无界面浏览器没有鼠标指针）
 HELPERS = r"""
@@ -60,27 +58,35 @@ window.__click = (el) => {
 """
 
 
-class Recorder:
-    def __init__(self, cdp: CDP) -> None:
-        self.cdp = cdp
-        self.frames: list[tuple[float, str]] = []
-        self.events: list[dict[str, Any]] = []
-        (OUT / "frames").mkdir(parents=True, exist_ok=True)
-        cdp.on("Page.screencastFrame", self._frame)
+class Marks:
+    """Scene / speed-up markers. The base class only logs; Recorder also captures frames."""
 
-    async def _frame(self, p: dict[str, Any]) -> None:
-        t = time.time()
-        name = f"{len(self.frames):06d}.jpg"
-        (OUT / "frames" / name).write_bytes(base64.b64decode(p["data"]))
-        self.frames.append((t, name))
-        await self.cdp.send("Page.screencastFrameAck", {"sessionId": p["sessionId"]})
+    def __init__(self) -> None:
+        self.events: list[dict[str, Any]] = []
 
     def mark(self, kind: str, **kw: Any) -> None:
         self.events.append({"t": time.time(), "kind": kind, **kw})
         print(time.strftime("%H:%M:%S"), kind, kw.get("title", ""), flush=True)
 
+
+class Recorder(Marks):
+    def __init__(self, cdp: CDP, out: Path) -> None:
+        super().__init__()
+        self.cdp = cdp
+        self.out = out
+        self.frames: list[tuple[float, str]] = []
+        (out / "frames").mkdir(parents=True, exist_ok=True)
+        cdp.on("Page.screencastFrame", self._frame)
+
+    async def _frame(self, p: dict[str, Any]) -> None:
+        t = time.time()
+        name = f"{len(self.frames):06d}.jpg"
+        (self.out / "frames" / name).write_bytes(base64.b64decode(p["data"]))
+        self.frames.append((t, name))
+        await self.cdp.send("Page.screencastFrameAck", {"sessionId": p["sessionId"]})
+
     def save(self) -> None:
-        (OUT / "timeline.json").write_text(
+        (self.out / "timeline.json").write_text(
             json.dumps({"frames": self.frames, "events": self.events}, ensure_ascii=False), "utf-8"
         )
 
@@ -143,7 +149,7 @@ RESULTS = "(document.querySelectorAll('main .ant-card').length > 0 && !document.
 CHAT_TEXT = "(document.querySelector('main')?.innerText.length || 0)"
 
 
-async def ask(cdp: CDP, rec: Recorder, question: str) -> None:
+async def ask(cdp: CDP, rec: Marks, question: str) -> None:
     """Type a chat question, speed up the wait before the first token, wait for the answer to finish."""
     await type_text(cdp, CHAT_BOX, question)
     await asyncio.sleep(0.5)
@@ -174,7 +180,7 @@ async def focus_label(cdp: CDP, label: str) -> str:
     )
 
 
-async def scenes(cdp: CDP, rec: Recorder) -> None:
+async def scenes(cdp: CDP, rec: Marks) -> None:
     # 1 产品
     await goto(cdp, "/")
     rec.mark("scene", title="1 / 8  保险产品")
@@ -273,36 +279,44 @@ async def scenes(cdp: CDP, rec: Recorder) -> None:
     rec.mark("end")
 
 
-def api_login() -> dict[str, Any]:
+def api_login(user: str, password: str) -> dict[str, Any]:
     req = urllib.request.Request(
         BASE.replace("8080", "8000") + "/api/v1/auth/login",
-        data=json.dumps({"username": USER, "password": PASSWORD}).encode(),
+        data=json.dumps({"username": user, "password": password}).encode(),
         headers={"Content-Type": "application/json"},
     )
     with urllib.request.urlopen(req) as r:
         return dict(json.load(r))
 
 
-async def main() -> None:
-    proc = launch(9334, W, H)
+async def open_session(
+    port: int, user: str, password: str, width: int = W, height: int = H, scale: float = 1
+) -> tuple[Any, CDP]:
+    """Launch headless Edge, size the viewport, and log in by putting the token in localStorage."""
+    proc = launch(port, width, height)
+    cdp = await CDP.connect(await page_ws_url(port))
+    await cdp.send("Page.enable")
+    await cdp.send("Runtime.enable")
+    await cdp.send("Emulation.setFocusEmulationEnabled", {"enabled": True})
+    await cdp.send("Page.bringToFront")
+    await cdp.send(
+        "Emulation.setDeviceMetricsOverride",
+        {"width": width, "height": height, "deviceScaleFactor": scale, "mobile": False},
+    )
+    tok = api_login(user, password)
+    await cdp.send("Page.navigate", {"url": BASE + "/"})
+    await asyncio.sleep(1.5)
+    state = {"state": {"token": tok["access_token"], "user": tok["user"]}, "version": 0}
+    await cdp.js(
+        f"localStorage.setItem('insurance-agent-auth', {json.dumps(json.dumps(state))}); true"
+    )
+    return proc, cdp
+
+
+async def main(out: Path, user: str, password: str) -> None:
+    proc, cdp = await open_session(9334, user, password)
     try:
-        cdp = await CDP.connect(await page_ws_url(9334))
-        await cdp.send("Page.enable")
-        await cdp.send("Runtime.enable")
-        await cdp.send("Emulation.setFocusEmulationEnabled", {"enabled": True})
-        await cdp.send("Page.bringToFront")
-        await cdp.send(
-            "Emulation.setDeviceMetricsOverride",
-            {"width": W, "height": H, "deviceScaleFactor": 1, "mobile": False},
-        )
-        tok = api_login()
-        await cdp.send("Page.navigate", {"url": BASE + "/"})
-        await asyncio.sleep(1.5)
-        state = {"state": {"token": tok["access_token"], "user": tok["user"]}, "version": 0}
-        await cdp.js(
-            f"localStorage.setItem('insurance-agent-auth', {json.dumps(json.dumps(state))}); true"
-        )
-        rec = Recorder(cdp)
+        rec = Recorder(cdp, out)
         await cdp.send(
             "Page.startScreencast", {"format": "jpeg", "quality": 85, "maxWidth": W, "maxHeight": H}
         )
@@ -318,4 +332,5 @@ async def main() -> None:
         proc.terminate()
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main(Path(sys.argv[1]), sys.argv[2], sys.argv[3]))
